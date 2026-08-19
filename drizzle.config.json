@@ -1,0 +1,7 @@
+{
+  "dialect": "postgresql",
+  "schema": "./src/db/schema.ts",
+  "dbCredentials": {
+    "url": "postgresql://postgres:cube7869@@127.0.0.1:5432/email_automation_db"
+  }
+}
