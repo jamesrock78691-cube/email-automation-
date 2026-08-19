@@ -3128,6 +3128,8 @@ readOnly={gmailForm.provider !== "custom" && gmailForm.provider !== "cpanel"}
   </div>
 </body>
 </html>`,
+                    bodyText: "",
+
                     attachmentsJson: "[]",
                   });
                 }}
