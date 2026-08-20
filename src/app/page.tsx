@@ -3129,7 +3129,6 @@ readOnly={gmailForm.provider !== "custom" && gmailForm.provider !== "cpanel"}
 </body>
 </html>`,
                     bodyText: "",
-
                     attachmentsJson: "[]",
                   });
                 }}
@@ -3311,6 +3310,7 @@ readOnly={gmailForm.provider !== "custom" && gmailForm.provider !== "cpanel"}
                             name: tmpl.name,
                             subject: tmpl.subject,
                             bodyHtml: tmpl.bodyHtml,
+                            bodyText: tmpl.bodyText,
                             attachmentsJson: tmpl.attachmentsJson,
                           });
                         }}
