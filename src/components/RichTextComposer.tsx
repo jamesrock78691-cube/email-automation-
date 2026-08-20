@@ -100,7 +100,7 @@ export default function RichTextComposer({
       // Image embed for paste support
       try {
         const Image = Quill.import("formats/image");
-        Quill.register(Image, true);
+        Quill.register(Image as any, true);
       } catch {
         /* already registered */
       }
