@@ -3117,17 +3117,7 @@ readOnly={gmailForm.provider !== "custom" && gmailForm.provider !== "cpanel"}
                     id: "",
                     name: "",
                     subject: "",
-                    bodyHtml: `<!DOCTYPE html>
-<html>
-<body>
-  <div style="font-family: sans-serif; padding: 25px; border: 1px solid #e0e0e0;">
-    <h2>Action Required for Trademark {{mark_name}}</h2>
-    <p>Dear Client, your trademark Serial Number {{serial_no}} has been updated as of {{today}}.</p>
-    <p>Reference Code: {{reference_no}}</p>
-    {{tracking_pixel}}
-  </div>
-</body>
-</html>`,
+                    bodyHtml: "",
                     bodyText: "",
                     attachmentsJson: "[]",
                   });
