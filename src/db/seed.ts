@@ -129,36 +129,36 @@ export async function seedDatabase() {
     // Check gmail_accounts
     const existingAccounts = await db.select().from(gmailAccounts).limit(1);
     if (existingAccounts.length === 0) {
-      console.log("Seeding default Gmail accounts for rotation...");
-      await db.insert(gmailAccounts).values([
-        {
-          email: "rotator1@gmail.com",
-          appPassword: "abcd efgh ijkl mnop", // dummy app password
-          smtpHost: "smtp.gmail.com",
-          smtpPort: 465,
-          secure: true,
-          priority: 2,
-          dailyLimit: 300,
-          minuteLimit: 30,
-          sentToday: 0,
-          sentThisminute: 0,
-          status: "enabled",
-        },
-        {
-          email: "rotator2@gmail.com",
-          appPassword: "qrst uvwx yzab cdef", // dummy app password
-          smtpHost: "smtp.gmail.com",
-          smtpPort: 465,
-          secure: true,
-          priority: 1,
-          dailyLimit: 200,
-          minuteLimit: 20,
-          sentToday: 0,
-          sentThisminute: 0,
-          status: "enabled",
-        }
-      ]);
-    }
+  console.log("Seeding default Gmail accounts for rotation...");
+
+  await db.insert(gmailAccounts).values({
+    email: "rotator1@gmail.com",
+    appPassword: "abcd efgh ijkl mnop",
+    smtpHost: "smtp.gmail.com",
+    smtpPort: 465,
+    secure: true,
+    priority: 2,
+    dailyLimit: 300,
+    minuteLimit: 30,
+    sentToday: 0,
+    sentThisminute: 0,
+    status: "enabled",
+  });
+
+  await db.insert(gmailAccounts).values({
+    email: "rotator2@gmail.com",
+    appPassword: "qrst uvwx yzab cdef",
+    smtpHost: "smtp.gmail.com",
+    smtpPort: 465,
+    secure: true,
+    priority: 1,
+    dailyLimit: 200,
+    minuteLimit: 20,
+    sentToday: 0,
+    sentThisminute: 0,
+    status: "enabled",
+  });
+}
 
     // Check campaigns
     const existingCampaigns = await db.select().from(campaigns).limit(1);
