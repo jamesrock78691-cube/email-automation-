@@ -27,7 +27,7 @@ import {
   Users
 } from "lucide-react";
 
-const RichTextComposer = dynamic(() => import("@/components/RichTextComposer"), { ssr: false }); 
+const RichTextComposer = dynamic(() => import("../components/RichTextComposer"), { ssr: false });
 
 
 // Mock CSV / Spreadsheet text to pre-load so the user can easily test
@@ -3117,8 +3117,17 @@ readOnly={gmailForm.provider !== "custom" && gmailForm.provider !== "cpanel"}
                     id: "",
                     name: "",
                     subject: "",
-                    bodyHtml: "",
-                    bodyText: "",
+                    bodyHtml: `<!DOCTYPE html>
+<html>
+<body>
+  <div style="font-family: sans-serif; padding: 25px; border: 1px solid #e0e0e0;">
+    <h2>Action Required for Trademark {{mark_name}}</h2>
+    <p>Dear Client, your trademark Serial Number {{serial_no}} has been updated as of {{today}}.</p>
+    <p>Reference Code: {{reference_no}}</p>
+    {{tracking_pixel}}
+  </div>
+</body>
+</html>`,
                     attachmentsJson: "[]",
                   });
                 }}
@@ -3300,7 +3309,6 @@ readOnly={gmailForm.provider !== "custom" && gmailForm.provider !== "cpanel"}
                             name: tmpl.name,
                             subject: tmpl.subject,
                             bodyHtml: tmpl.bodyHtml,
-                            bodyText: tmpl.bodyText,
                             attachmentsJson: tmpl.attachmentsJson,
                           });
                         }}
