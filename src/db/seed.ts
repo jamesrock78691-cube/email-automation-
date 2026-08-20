@@ -141,7 +141,7 @@ export async function seedDatabase() {
     dailyLimit: 300,
     minuteLimit: 30,
     sentToday: 0,
-    sentThisminute: 0,
+    sentThisMinute: 0,
     status: "enabled",
   });
 
@@ -155,7 +155,7 @@ export async function seedDatabase() {
     dailyLimit: 200,
     minuteLimit: 20,
     sentToday: 0,
-    sentThisminute: 0,
+    sentThisMinute: 0,
     status: "enabled",
   });
 }
