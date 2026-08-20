@@ -27,7 +27,7 @@ import {
   Users
 } from "lucide-react";
 
-const RichTextComposer = dynamic(() => import("@/components/RichTextComposer"), { ssr: false });
+const RichTextComposer = dynamic(() => import("@/components/RichTextComposer"), { ssr: false }); 
 
 
 // Mock CSV / Spreadsheet text to pre-load so the user can easily test
