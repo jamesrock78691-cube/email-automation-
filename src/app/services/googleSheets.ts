@@ -221,6 +221,11 @@ export interface ManualLogRow {
 /**
  * Compose se email bhejne ke baad Manual Sent Log sheet mein naya row add karta hai
  */
+/**
+ * Compose se email bhejne ke baad Manual Sent Log sheet mein naya row add karta hai
+ * Headers: reference_no, serial_no, mark_name, filing_date, Email, CC, BCC, Subject,
+ *          Template Name, Status, Sent At, Gmail Used, Sent By, Sent By ID, Tracking ID
+ */
 export async function appendManualSentLog(data: ManualLogRow) {
   try {
     if (!MANUAL_SHEET_ID) {
@@ -231,10 +236,10 @@ export async function appendManualSentLog(data: ManualLogRow) {
     const sheet = await getManualSheet();
 
     await sheet.addRow({
-      "Reference No": data.referenceNo || "",
+      reference_no: data.referenceNo || "",
       serial_no: data.serialNo || "",
-      "Mark Name": data.markName || "",
-      "Filing Date": data.filingDate || "",
+      mark_name: data.markName || "",
+      filing_date: data.filingDate || "",
       Email: data.email || "",
       CC: data.cc || "",
       BCC: data.bcc || "",
