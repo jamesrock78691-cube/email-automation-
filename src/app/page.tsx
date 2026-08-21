@@ -708,7 +708,7 @@ const [manualSending, setManualSending] = useState(false);
       body: JSON.stringify({
         ...manualEmailForm,
         html: finalHtml,
-        sentByUserId: authUser?.id,
+        sentByUserId: authUser?.username,
         referenceNo: composeVariables?.reference_no || "",
 serialNo: composeVariables?.serial_no || "",
 markName: composeVariables?.mark_name || "",
