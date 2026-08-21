@@ -236,10 +236,10 @@ export async function appendManualSentLog(data: ManualLogRow) {
     const sheet = await getManualSheet();
 
     await sheet.addRow({
-      reference_no: data.referenceNo || "",
-      serial_no: data.serialNo || "",
-      mark_name: data.markName || "",
-      filing_date: data.filingDate || "",
+      referenceNo: data.referenceNo || "",
+      serialNo: data.serialNo || "",
+      markName: data.markName || "",
+      filingDate: data.filingDate || "",
       Email: data.email || "",
       CC: data.cc || "",
       BCC: data.bcc || "",
