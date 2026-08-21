@@ -709,6 +709,10 @@ const [manualSending, setManualSending] = useState(false);
         ...manualEmailForm,
         html: finalHtml,
         sentByUserId: authUser?.id,
+        referenceNo: composeVariables?.reference_no || composeVariables?.referenceNo || "",
+            serialNo: composeVariables?.serial_no || composeVariables?.serialNo || "",
+            markName: composeVariables?.mark_name || composeVariables?.markName || "",
+           filingDate: composeVariables?.filing_date || composeVariables?.filingDate || "",
       }),
     });
      
