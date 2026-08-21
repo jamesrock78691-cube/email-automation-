@@ -187,10 +187,10 @@ export async function importPendingRowsToQueue() {
       maxTries: 3,
     });
 
-    await updateRow(row.rowNumber, {
-      status: "Imported",
-      trackingId,
-    });
+   // await updateRow(row.rowNumber, {
+   //   status: "Imported",
+    //  trackingId,
+  //  });
 
     imported++;
   }
