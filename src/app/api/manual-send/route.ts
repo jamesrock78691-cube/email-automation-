@@ -119,23 +119,23 @@ export async function POST(request: NextRequest) {
 
     // ===== Manual Sent Log sheet mein row add =====
     try {
-      await appendManualSentLog({
-        referenceNo: referenceNo || "",
-        serialNo: serialNo || "",
-        markName: markName || "",
-        filingDate: filingDate || "",
-        email: to,
-        cc: cc || "",
-        bcc: bcc || "",
-        subject,
-        templateName: templateName || "",
-        status: "Sent",
-        sentAt: new Date().toISOString(),
-        gmailUsed: account.email,
-        sentBy: sentByUsername || fromName || "unknown",
-        sentById: sentByUserId || "",
-        trackingId,
-      });
+     await appendManualSentLog({
+  referenceNo: referenceNo || "",
+  serialNo: serialNo || "",
+  markName: markName || "",
+  filingDate: filingDate || "",
+  email: to,
+  cc: cc || "",
+  bcc: bcc || "",
+  subject,
+  templateName: templateName || "",
+  status: "Sent",
+  sentAt: new Date().toISOString(),
+  gmailUsed: account.email,
+  sentBy: sentByUsername || "",   // <-- sirf operator username
+  sentById: sentByUserId || "",
+  trackingId,
+});
     } catch (logErr) {
       console.error("Manual log sheet write failed (email still sent):", logErr);
     }
