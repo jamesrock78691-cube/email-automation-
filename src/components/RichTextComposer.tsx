@@ -17,7 +17,10 @@ function extractRenderableHtml(raw: string): string {
 
   // If full document, prefer body inner HTML
   try {
-    if (typeof window !== "undefined" && (html.includes("<html") || html.includes("<body") || html.includes("<!DOCTYPE"))) {
+    if (
+      typeof window !== "undefined" &&
+      (html.includes("<html") || html.includes("<body") || html.includes("<!DOCTYPE"))
+    ) {
       const doc = new DOMParser().parseFromString(html, "text/html");
       const body = doc.body;
       if (body && body.innerHTML.trim()) {
@@ -34,6 +37,75 @@ function extractRenderableHtml(raw: string): string {
   html = html.replace(/on\w+='[^']*'/gi, "");
 
   return html.trim();
+}
+
+/**
+ * Convert inline text-align styles → Quill alignment classes
+ * so the editor shows center/right correctly when loading templates
+ */
+function convertInlineAlignToQuill(html: string): string {
+  if (!html) return html;
+
+  let result = html;
+
+  // style="...text-align: center..." → class="ql-align-center"
+  result = result.replace(
+    /style="([^"]*?)text-align:\s*center;?([^"]*?)"/gi,
+    (_match, before, after) => {
+      const other = (before + after)
+        .replace(/;+/g, ";")
+        .replace(/^;|;$/g, "")
+        .trim();
+      if (other) {
+        return `class="ql-align-center" style="${other}"`;
+      }
+      return `class="ql-align-center"`;
+    }
+  );
+
+  result = result.replace(
+    /style="([^"]*?)text-align:\s*right;?([^"]*?)"/gi,
+    (_match, before, after) => {
+      const other = (before + after)
+        .replace(/;+/g, ";")
+        .replace(/^;|;$/g, "")
+        .trim();
+      if (other) {
+        return `class="ql-align-right" style="${other}"`;
+      }
+      return `class="ql-align-right"`;
+    }
+  );
+
+  result = result.replace(
+    /style="([^"]*?)text-align:\s*justify;?([^"]*?)"/gi,
+    (_match, before, after) => {
+      const other = (before + after)
+        .replace(/;+/g, ";")
+        .replace(/^;|;$/g, "")
+        .trim();
+      if (other) {
+        return `class="ql-align-justify" style="${other}"`;
+      }
+      return `class="ql-align-justify"`;
+    }
+  );
+
+  result = result.replace(
+    /style="([^"]*?)text-align:\s*left;?([^"]*?)"/gi,
+    (_match, before, after) => {
+      const other = (before + after)
+        .replace(/;+/g, ";")
+        .replace(/^;|;$/g, "")
+        .trim();
+      if (other) {
+        return `class="ql-align-left" style="${other}"`;
+      }
+      return `class="ql-align-left"`;
+    }
+  );
+
+  return result;
 }
 
 /**
@@ -194,7 +266,9 @@ export default function RichTextComposer({
             e.preventDefault();
             e.stopPropagation();
 
-            const cleaned = extractRenderableHtml(htmlData);
+            let cleaned = extractRenderableHtml(htmlData);
+            cleaned = convertInlineAlignToQuill(cleaned);
+
             const range = quill.getSelection(true);
             const index = range ? range.index : quill.getLength();
 
@@ -202,7 +276,6 @@ export default function RichTextComposer({
             try {
               quill.clipboard.dangerouslyPasteHTML(index, cleaned, "user");
             } catch {
-              // fallback insert
               quill.clipboard.dangerouslyPasteHTML(cleaned);
             }
             applyingExternalRef.current = false;
@@ -226,7 +299,8 @@ export default function RichTextComposer({
           ) {
             e.preventDefault();
             e.stopPropagation();
-            const cleaned = extractRenderableHtml(plain);
+            let cleaned = extractRenderableHtml(plain);
+            cleaned = convertInlineAlignToQuill(cleaned);
             const range = quill.getSelection(true);
             const index = range ? range.index : quill.getLength();
             applyingExternalRef.current = true;
@@ -241,7 +315,9 @@ export default function RichTextComposer({
       );
 
       const setHtmlIntoEditor = (raw: string) => {
-        const cleaned = extractRenderableHtml(raw);
+        let cleaned = extractRenderableHtml(raw);
+        cleaned = convertInlineAlignToQuill(cleaned); // ← important for alignment
+
         applyingExternalRef.current = true;
         try {
           const len = quill.getLength();
@@ -301,7 +377,8 @@ export default function RichTextComposer({
     if (typeof (quill as any).__setHtml === "function") {
       (quill as any).__setHtml(incoming);
     } else {
-      const cleaned = extractRenderableHtml(incoming);
+      let cleaned = extractRenderableHtml(incoming);
+      cleaned = convertInlineAlignToQuill(cleaned);
       applyingExternalRef.current = true;
       try {
         const len = quill.getLength();
@@ -352,6 +429,20 @@ export default function RichTextComposer({
           border-color: #d1d5db;
         }
 
+        /* ===== Alignment fix (important) ===== */
+        .ql-editor .ql-align-center {
+          text-align: center !important;
+        }
+        .ql-editor .ql-align-right {
+          text-align: right !important;
+        }
+        .ql-editor .ql-align-justify {
+          text-align: justify !important;
+        }
+        .ql-editor .ql-align-left {
+          text-align: left !important;
+        }
+
         .ql-snow .ql-picker.ql-font .ql-picker-label[data-value="arial"]::before,
         .ql-snow .ql-picker.ql-font .ql-picker-item[data-value="arial"]::before {
           content: "Arial"; font-family: Arial, sans-serif;
@@ -393,48 +484,42 @@ export default function RichTextComposer({
           content: "Comic Sans MS"; font-family: "Comic Sans MS", cursive;
         }
 
-        .ql-font-arial { font-family: Arial, Helvetica, sans-serif; }
-        .ql-font-helvetica { font-family: Helvetica, Arial, sans-serif; }
-        .ql-font-times-new-roman { font-family: "Times New Roman", Times, serif; }
-        .ql-font-georgia { font-family: Georgia, serif; }
-        .ql-font-verdana { font-family: Verdana, Geneva, sans-serif; }
-        .ql-font-courier-new { font-family: "Courier New", Courier, monospace; }
-        .ql-font-tahoma { font-family: Tahoma, Geneva, sans-serif; }
-        .ql-font-trebuchet-ms { font-family: "Trebuchet MS", Helvetica, sans-serif; }
-        .ql-font-garamond { font-family: Garamond, serif; }
-        .ql-font-comic-sans-ms { font-family: "Comic Sans MS", cursive, sans-serif; }
-
         .ql-snow .ql-picker.ql-size .ql-picker-label[data-value="10px"]::before,
-        .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="10px"]::before { content: "10"; }
+        .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="10px"]::before {
+          content: "10px"; font-size: 10px;
+        }
         .ql-snow .ql-picker.ql-size .ql-picker-label[data-value="12px"]::before,
-        .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="12px"]::before { content: "12"; }
+        .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="12px"]::before {
+          content: "12px"; font-size: 12px;
+        }
         .ql-snow .ql-picker.ql-size .ql-picker-label[data-value="14px"]::before,
-        .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="14px"]::before { content: "14"; }
+        .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="14px"]::before {
+          content: "14px"; font-size: 14px;
+        }
         .ql-snow .ql-picker.ql-size .ql-picker-label[data-value="16px"]::before,
-        .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="16px"]::before { content: "16"; }
+        .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="16px"]::before {
+          content: "16px"; font-size: 16px;
+        }
         .ql-snow .ql-picker.ql-size .ql-picker-label[data-value="18px"]::before,
-        .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="18px"]::before { content: "18"; }
+        .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="18px"]::before {
+          content: "18px"; font-size: 18px;
+        }
         .ql-snow .ql-picker.ql-size .ql-picker-label[data-value="20px"]::before,
-        .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="20px"]::before { content: "20"; }
+        .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="20px"]::before {
+          content: "20px"; font-size: 20px;
+        }
         .ql-snow .ql-picker.ql-size .ql-picker-label[data-value="24px"]::before,
-        .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="24px"]::before { content: "24"; }
+        .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="24px"]::before {
+          content: "24px"; font-size: 24px;
+        }
         .ql-snow .ql-picker.ql-size .ql-picker-label[data-value="28px"]::before,
-        .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="28px"]::before { content: "28"; }
+        .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="28px"]::before {
+          content: "28px"; font-size: 28px;
+        }
         .ql-snow .ql-picker.ql-size .ql-picker-label[data-value="32px"]::before,
-        .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="32px"]::before { content: "32"; }
-
-        .ql-size-10px { font-size: 10px; }
-        .ql-size-12px { font-size: 12px; }
-        .ql-size-14px { font-size: 14px; }
-        .ql-size-16px { font-size: 16px; }
-        .ql-size-18px { font-size: 18px; }
-        .ql-size-20px { font-size: 20px; }
-        .ql-size-24px { font-size: 24px; }
-        .ql-size-28px { font-size: 28px; }
-        .ql-size-32px { font-size: 32px; }
-
-        .rich-text-composer-wrapper .ql-toolbar .ql-formats { margin-right: 8px; }
-        .rich-text-composer-wrapper .ql-snow .ql-picker { font-size: 13px; }
+        .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="32px"]::before {
+          content: "32px"; font-size: 32px;
+        }
       `,
         }}
       />
