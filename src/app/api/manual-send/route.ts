@@ -3,6 +3,8 @@ import nodemailer from "nodemailer";
 import { db } from "@/db";
 import { gmailAccounts } from "@/db/schema";
 import { eq, and, desc } from "drizzle-orm";
+import { appendManualSentLog } from "@/app/services/googleSheets";
+import { randomUUID } from "crypto";
 
 export async function POST(request: NextRequest) {
   try {
@@ -19,6 +21,14 @@ export async function POST(request: NextRequest) {
       html,
       text,
       smtpAccountId,
+      // optional extra fields for sheet log
+      referenceNo,
+      serialNo,
+      markName,
+      filingDate,
+      templateName,
+      sentByUserId,
+      sentByUsername,
     } = body;
 
     if (!to || !subject || !html) {
@@ -80,6 +90,7 @@ export async function POST(request: NextRequest) {
 
     const displayFrom = fromEmail || (account as any).fromEmail || account.email;
     const displayName = fromName || account.senderName || account.email;
+    const trackingId = randomUUID();
 
     await transporter.sendMail({
       from: `"${displayName}" <${displayFrom}>`,
@@ -106,10 +117,34 @@ export async function POST(request: NextRequest) {
       })
       .where(eq(gmailAccounts.id, account.id));
 
+    // ===== Manual Sent Log sheet mein row add =====
+    try {
+      await appendManualSentLog({
+        referenceNo: referenceNo || "",
+        serialNo: serialNo || "",
+        markName: markName || "",
+        filingDate: filingDate || "",
+        email: to,
+        cc: cc || "",
+        bcc: bcc || "",
+        subject,
+        templateName: templateName || "",
+        status: "Sent",
+        sentAt: new Date().toISOString(),
+        gmailUsed: account.email,
+        sentBy: sentByUsername || fromName || "unknown",
+        sentById: sentByUserId || "",
+        trackingId,
+      });
+    } catch (logErr) {
+      console.error("Manual log sheet write failed (email still sent):", logErr);
+    }
+
     return NextResponse.json({
       success: true,
       message: "Email sent successfully",
       usedAccount: account.email,
+      trackingId,
     });
   } catch (error: any) {
     console.error("Manual send error:", error);
