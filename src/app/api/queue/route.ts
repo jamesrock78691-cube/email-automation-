@@ -27,11 +27,13 @@ export async function POST(request: NextRequest) {
     const protocol = host.startsWith("localhost") ? "http" : "https";
     const baseUrl = `${protocol}://${host}`;
 
+    // ---------- PROCESS ONE ----------
     if (action === "process_next") {
       const result = await processNextQueueItem(baseUrl);
       return NextResponse.json({ success: true, result });
     }
 
+    // ---------- PROCESS BATCH ----------
     if (action === "process_batch") {
       const results = [];
       let successCount = 0;
@@ -54,17 +56,25 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    /**
-     * Import sheet / simulator rows into queue.
-     * Invalid campaign_id / template_id are nulled so FK does not break insert.
-     */
+    // ---------- IMPORT (FIXED) ----------
     if (action === "import") {
       if (items && Array.isArray(items) && items.length > 0) {
+        // 1) Load all valid template IDs once
+        const allTemplates = await db
+          .select({ id: templates.id, subject: templates.subject })
+          .from(templates);
+        const validTemplateIds = new Set(allTemplates.map((t) => t.id));
+        const firstTemplate = allTemplates[0] || null;
+
+        // 2) Validate campaign (if given)
+        let validCampaignId: number | null = null;
         let campaignTemplateId: number | null = null;
         let campaignSubject: string | null = null;
-        const cid = campaignId ? Number(campaignId) : null;
 
-        let validCampaignId: number | null = null;
+        const cid = campaignId != null && campaignId !== ""
+          ? Number(campaignId)
+          : null;
+
         if (cid && !Number.isNaN(cid)) {
           const camps = await db
             .select()
@@ -74,32 +84,27 @@ export async function POST(request: NextRequest) {
 
           if (camps.length > 0) {
             validCampaignId = camps[0].id;
-            if (camps[0].templateId) {
-              const tpls = await db
-                .select()
-                .from(templates)
-                .where(eq(templates.id, camps[0].templateId))
-                .limit(1);
-              if (tpls.length > 0) {
-                campaignTemplateId = camps[0].templateId;
-                campaignSubject = tpls[0].subject || null;
-              }
+
+            if (
+              camps[0].templateId &&
+              validTemplateIds.has(camps[0].templateId)
+            ) {
+              campaignTemplateId = camps[0].templateId;
+              const tpl = allTemplates.find((t) => t.id === campaignTemplateId);
+              campaignSubject = tpl?.subject || null;
             }
           }
         }
 
-        const allTemplates = await db
-          .select({ id: templates.id })
-          .from(templates);
-        const validTemplateIds = new Set(allTemplates.map((t) => t.id));
-
+        // Fallback template = campaign template → else first template in DB
         const fallbackTemplateId =
-          campaignTemplateId ??
-          (allTemplates.length > 0 ? allTemplates[0].id : null);
+          campaignTemplateId ?? (firstTemplate ? firstTemplate.id : null);
 
+        // 3) Build safe rows (no invalid FKs)
         const rows = items
-          .filter((it: any) => it.email && String(it.email).trim())
+          .filter((it: any) => it?.email && String(it.email).trim())
           .map((it: any) => {
+            // Resolve templateId safely
             let rowTemplateId: number | null = null;
 
             if (it.templateId != null && it.templateId !== "") {
@@ -114,18 +119,23 @@ export async function POST(request: NextRequest) {
             }
 
             return {
-              campaignId: validCampaignId,
-              referenceNo: String(it.referenceNo || it.reference_no || ""),
-              serialNo: String(it.serialNo || it.serial_no || ""),
-              markName: String(it.markName || it.mark_name || ""),
-              filingDate: String(it.filingDate || it.filing_date || ""),
-              email: String(it.email || "").trim(),
+              campaignId: validCampaignId, // null if campaign missing
+              referenceNo: String(
+                it.referenceNo ?? it.reference_no ?? ""
+              ),
+              serialNo: String(it.serialNo ?? it.serial_no ?? ""),
+              markName: String(it.markName ?? it.mark_name ?? ""),
+              filingDate: String(it.filingDate ?? it.filing_date ?? ""),
+              email: String(it.email).trim(),
               cc: it.cc ? String(it.cc) : null,
               bcc: it.bcc ? String(it.bcc) : null,
               subject: String(
-                it.subject || campaignSubject || "Trademark Notice"
+                it.subject ||
+                  campaignSubject ||
+                  firstTemplate?.subject ||
+                  "Trademark Notice"
               ),
-              templateId: rowTemplateId,
+              templateId: rowTemplateId, // null if no templates exist
               trackingId: randomUUID(),
               status: "pending" as const,
               tries: 0,
@@ -137,23 +147,25 @@ export async function POST(request: NextRequest) {
           return NextResponse.json(
             {
               success: false,
-              error: "No valid rows (need Email column)",
+              error: "No valid rows (Email column required)",
             },
             { status: 400 }
           );
         }
 
+        // 4) Insert
         try {
           await db.insert(queue).values(rows);
         } catch (insertErr: any) {
           console.error("Queue insert error:", insertErr);
+          const msg =
+            insertErr?.cause?.message ||
+            insertErr?.message ||
+            "Failed to insert into queue";
           return NextResponse.json(
             {
               success: false,
-              error:
-                insertErr?.cause?.message ||
-                insertErr?.message ||
-                "Failed to insert into queue",
+              error: msg,
               detail: String(insertErr?.cause || insertErr),
             },
             { status: 500 }
@@ -165,14 +177,26 @@ export async function POST(request: NextRequest) {
           count: rows.length,
           campaignId: validCampaignId,
           templateId: fallbackTemplateId,
-          message: `Imported ${rows.length} rows successfully`,
+          message: `Imported ${rows.length} test/rows successfully`,
         });
       }
 
-      const result = await importPendingRowsToQueue();
-      return NextResponse.json(result);
+      // No items array → Google Sheets fallback
+      try {
+        const result = await importPendingRowsToQueue();
+        return NextResponse.json(result);
+      } catch (sheetErr: any) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: sheetErr?.message || "Sheets import failed",
+          },
+          { status: 500 }
+        );
+      }
     }
 
+    // ---------- RESET FAILED ----------
     if (action === "reset_all") {
       await db
         .update(queue)
@@ -192,6 +216,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    // ---------- CLEAR ALL ----------
     if (action === "clear_all") {
       await db.delete(queue);
       return NextResponse.json({
