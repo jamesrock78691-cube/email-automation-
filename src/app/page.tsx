@@ -2749,6 +2749,7 @@ const handleAttachmentUpload = async (
   </div>
 )}
         {/* Tab 2: Google Sheets Importer Simulator */}
+                {/* Tab 2: Google Sheets Importer Simulator */}
         {activeTab === "sheets_importer" && (
           <div className="space-y-6">
             <div className="bg-slate-950/60 border border-slate-800 p-6 rounded-2xl space-y-4">
@@ -2769,37 +2770,37 @@ const handleAttachmentUpload = async (
                     onChange={(e) => setImportCampaignId(e.target.value)}
                     className="bg-slate-900 border border-slate-700 text-white rounded text-xs px-2.5 py-1.5 focus:outline-none"
                   >
-                    {campaigns.map(c => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
+                    {campaigns.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
                     ))}
                   </select>
                 </div>
               </div>
 
-              {/* Table Column Reference Order Sheet */}
               <div className="space-y-2">
                 <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">
                   Mandatory Frozen Sheet Columns:
                 </span>
                 <div className="grid grid-cols-2 md:grid-cols-6 gap-2 text-center">
-                  {[
-                    "Reference No",
-                    "Serial No",
-                    "Mark Name",
-                    "Filing Date",
-                    "Email",
-                    "CC / BCC"
-                  ].map((col, idx) => (
-                    <div key={idx} className="bg-slate-900/80 border border-slate-800 p-2 rounded text-xs font-mono font-semibold text-emerald-300">
-                      {col}
-                    </div>
-                  ))}
+                  {["Reference No", "Serial No", "Mark Name", "Filing Date", "Email", "CC / BCC"].map(
+                    (col, idx) => (
+                      <div
+                        key={idx}
+                        className="bg-slate-900/80 border border-slate-800 p-2 rounded text-xs font-mono font-semibold text-emerald-300"
+                      >
+                        {col}
+                      </div>
+                    )
+                  )}
                 </div>
               </div>
 
-              {/* Text Area */}
               <div className="space-y-2">
-                <label className="text-xs font-semibold text-slate-300">Edit or Paste Raw CSV Rows:</label>
+                <label className="text-xs font-semibold text-slate-300">
+                  Edit or Paste Raw CSV Rows:
+                </label>
                 <textarea
                   value={spreadsheetText}
                   onChange={(e) => setSpreadsheetText(e.target.value)}
@@ -2809,19 +2810,7 @@ const handleAttachmentUpload = async (
                 />
               </div>
 
-              <div className="flex justify-between items-center">
-                <button
-                  onClick={() => setSpreadsheetText(DEFAULT_SHEETS_CSV)}
-                  className="text-xs text-slate-400 hover:text-white underline"
-                >
-                  Reset Template Rows
-                </button>
-                <button
-                  onClick={handleImportSheet}
-                  disabled={loading}
-                  className="bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-bold text-sm px-6 py-2.5 rounded-xl transition shadow-lg shadow-emerald-600/15"
-                >
-                                <div className="flex justify-between items-center gap-3 flex-wrap">
+              <div className="flex justify-between items-center gap-3 flex-wrap">
                 <button
                   type="button"
                   onClick={() => setSpreadsheetText(DEFAULT_SHEETS_CSV)}
@@ -2848,6 +2837,29 @@ const handleAttachmentUpload = async (
                   </button>
                 </div>
               </div>
+            </div>
+
+            <div className="bg-slate-950/40 border border-slate-800 p-5 rounded-xl space-y-2">
+              <h4 className="text-sm font-semibold text-white">How the Sheet Rotation Flow Works:</h4>
+              <ul className="list-disc pl-5 text-xs text-slate-400 space-y-1">
+                <li>
+                  Under general configuration, the Gmail rotator script parses these imported rows
+                  sequentially.
+                </li>
+                <li>
+                  Each recipient&apos;s dynamic variables such as{" "}
+                  <code className="text-blue-300 font-mono">{"{{mark_name}}"}</code>,{" "}
+                  <code className="text-blue-300 font-mono">{"{{serial_no}}"}</code>, and{" "}
+                  <code className="text-blue-300 font-mono">{"{{reference_no}}"}</code> are
+                  automatically evaluated dynamically.
+                </li>
+                <li>
+                  The system tracks sending status, Gmail account used, and individual tracking opens
+                  by automatically syncing back state.
+                </li>
+              </ul>
+            </div>
+          </div>
         )}
 
         {/* Tab 3: Gmail Setup */}
