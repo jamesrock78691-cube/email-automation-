@@ -32,7 +32,6 @@ const RichTextComposer = dynamic(() => import("../components/RichTextComposer"),
 // Empty by default — paste real CSV or sync from Google Sheets
 const DEFAULT_SHEETS_CSV = `Reference No,Serial No,Mark Name,Filing Date,Email,CC,BCC,Subject,Template,Attachment
 `;
-REF-2026-8812,91230491,ZENITH ORGANICS INC,2025-12-15,admin@zenithorganics.test,,,Advisory: Trademark Renewal is Due for ZENITH ORGANICS INC - Serial #91230491,2,Renewal_Instructions.pdf`;
 
 export default function EmailAutomationDashboard() {
   // Tabs: 'dashboard', 'gmail_accounts', 'sheets_importer', 'templates', 'queue_logs'
