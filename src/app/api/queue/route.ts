@@ -55,8 +55,8 @@ export async function POST(request: NextRequest) {
     }
 
     /**
-     * Import sheet rows into queue.
-     * If campaignId is set → use that campaign's templateId for every row.
+     * Import sheet / simulator rows into queue.
+     * Invalid campaign_id / template_id are nulled so FK does not break insert.
      */
     if (action === "import") {
       if (items && Array.isArray(items) && items.length > 0) {
@@ -64,40 +64,62 @@ export async function POST(request: NextRequest) {
         let campaignSubject: string | null = null;
         const cid = campaignId ? Number(campaignId) : null;
 
-        if (cid) {
+        let validCampaignId: number | null = null;
+        if (cid && !Number.isNaN(cid)) {
           const camps = await db
             .select()
             .from(campaigns)
             .where(eq(campaigns.id, cid))
             .limit(1);
 
-          if (camps.length && camps[0].templateId) {
-            campaignTemplateId = camps[0].templateId;
-            const tpls = await db
-              .select()
-              .from(templates)
-              .where(eq(templates.id, campaignTemplateId))
-              .limit(1);
-            if (tpls.length) {
-              campaignSubject = tpls[0].subject || null;
+          if (camps.length > 0) {
+            validCampaignId = camps[0].id;
+            if (camps[0].templateId) {
+              const tpls = await db
+                .select()
+                .from(templates)
+                .where(eq(templates.id, camps[0].templateId))
+                .limit(1);
+              if (tpls.length > 0) {
+                campaignTemplateId = camps[0].templateId;
+                campaignSubject = tpls[0].subject || null;
+              }
             }
           }
         }
 
+        const allTemplates = await db
+          .select({ id: templates.id })
+          .from(templates);
+        const validTemplateIds = new Set(allTemplates.map((t) => t.id));
+
+        const fallbackTemplateId =
+          campaignTemplateId ??
+          (allTemplates.length > 0 ? allTemplates[0].id : null);
+
         const rows = items
-          .filter((it: any) => it.email)
+          .filter((it: any) => it.email && String(it.email).trim())
           .map((it: any) => {
-            const rowTemplateId = it.templateId
-              ? Number(it.templateId)
-              : campaignTemplateId;
+            let rowTemplateId: number | null = null;
+
+            if (it.templateId != null && it.templateId !== "") {
+              const tid = Number(it.templateId);
+              if (!Number.isNaN(tid) && validTemplateIds.has(tid)) {
+                rowTemplateId = tid;
+              }
+            }
+
+            if (rowTemplateId == null) {
+              rowTemplateId = fallbackTemplateId;
+            }
 
             return {
-              campaignId: cid,
-              referenceNo: String(it.referenceNo || ""),
-              serialNo: String(it.serialNo || ""),
-              markName: String(it.markName || ""),
-              filingDate: String(it.filingDate || ""),
-              email: String(it.email || ""),
+              campaignId: validCampaignId,
+              referenceNo: String(it.referenceNo || it.reference_no || ""),
+              serialNo: String(it.serialNo || it.serial_no || ""),
+              markName: String(it.markName || it.mark_name || ""),
+              filingDate: String(it.filingDate || it.filing_date || ""),
+              email: String(it.email || "").trim(),
               cc: it.cc ? String(it.cc) : null,
               bcc: it.bcc ? String(it.bcc) : null,
               subject: String(
@@ -121,20 +143,32 @@ export async function POST(request: NextRequest) {
           );
         }
 
-        await db.insert(queue).values(rows);
+        try {
+          await db.insert(queue).values(rows);
+        } catch (insertErr: any) {
+          console.error("Queue insert error:", insertErr);
+          return NextResponse.json(
+            {
+              success: false,
+              error:
+                insertErr?.cause?.message ||
+                insertErr?.message ||
+                "Failed to insert into queue",
+              detail: String(insertErr?.cause || insertErr),
+            },
+            { status: 500 }
+          );
+        }
 
         return NextResponse.json({
           success: true,
           count: rows.length,
-          campaignId: cid,
-          templateId: campaignTemplateId,
-          message: campaignTemplateId
-            ? `Imported ${rows.length} rows with campaign template #${campaignTemplateId}`
-            : `Imported ${rows.length} rows (no campaign template linked)`,
+          campaignId: validCampaignId,
+          templateId: fallbackTemplateId,
+          message: `Imported ${rows.length} rows successfully`,
         });
       }
 
-      // Fallback: Google Sheets service import
       const result = await importPendingRowsToQueue();
       return NextResponse.json(result);
     }
