@@ -170,8 +170,8 @@ export async function importPendingRowsToQueue() {
       row.trackingId ||
       `track_${row.serialNo}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
-    await db.insert(queue).values({
-      campaignId: 1,
+        await db.insert(queue).values({
+      campaignId: null,
       referenceNo: row.referenceNo,
       serialNo: row.serialNo,
       markName: row.markName,
