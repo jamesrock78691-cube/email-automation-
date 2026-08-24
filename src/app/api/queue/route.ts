@@ -1,5 +1,3 @@
-// ========== PASTE 4: src/app/api/queue/route.ts — poori file overwrite ==========
-
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { queue, templates, campaigns } from "@/db/schema";
@@ -95,7 +93,9 @@ export async function POST(request: NextRequest) {
               email: String(it.email).trim(),
               cc: it.cc ? String(it.cc) : null,
               bcc: it.bcc ? String(it.bcc) : null,
-              subject: String(it.subject || campaignSubject || firstTemplate?.subject || "Trademark Notice"),
+              subject: String(
+                it.subject || campaignSubject || firstTemplate?.subject || "Trademark Notice"
+              ),
               templateId: rowTemplateId,
               trackingId: randomUUID(),
               status: "pending" as const,
@@ -105,13 +105,17 @@ export async function POST(request: NextRequest) {
           });
 
         if (!rows.length) {
-          return NextResponse.json({ success: false, error: "No valid rows (Email column required)" }, { status: 400 });
+          return NextResponse.json(
+            { success: false, error: "No valid rows (Email column required)" },
+            { status: 400 }
+          );
         }
 
         try {
           await db.insert(queue).values(rows);
         } catch (insertErr: any) {
-          const msg = insertErr?.cause?.message || insertErr?.message || "Failed to insert into queue";
+          const msg =
+            insertErr?.cause?.message || insertErr?.message || "Failed to insert into queue";
           return NextResponse.json({ success: false, error: msg }, { status: 500 });
         }
 
@@ -128,24 +132,43 @@ export async function POST(request: NextRequest) {
         const result = await importPendingRowsToQueue();
         return NextResponse.json(result);
       } catch (sheetErr: any) {
-        return NextResponse.json({ success: false, error: sheetErr?.message || "Sheets import failed" }, { status: 500 });
+        return NextResponse.json(
+          { success: false, error: sheetErr?.message || "Sheets import failed" },
+          { status: 500 }
+        );
       }
     }
 
     if (action === "reset_all") {
       await db
         .update(queue)
-        .set({ status: "pending", tries: 0, errorMessage: null, gmailUsedId: null, gmailUsedEmail: null, sentAt: null })
+        .set({
+          status: "pending",
+          tries: 0,
+          errorMessage: null,
+          gmailUsedId: null,
+          gmailUsedEmail: null,
+          sentAt: null,
+        })
         .where(eq(queue.status, "failed"));
-      return NextResponse.json({ success: true, message: "Only failed emails have been reset to pending status." });
+      return NextResponse.json({
+        success: true,
+        message: "Only failed emails have been reset to pending status.",
+      });
     }
 
     if (action === "clear_all") {
       await db.delete(queue);
-      return NextResponse.json({ success: true, message: "Queue database tables cleared successfully." });
+      return NextResponse.json({
+        success: true,
+        message: "Queue database tables cleared successfully.",
+      });
     }
 
-    return NextResponse.json({ success: false, error: "Invalid queue control action specified." }, { status: 400 });
+    return NextResponse.json(
+      { success: false, error: "Invalid queue control action specified." },
+      { status: 400 }
+    );
   } catch (error: any) {
     console.error("Queue control route error:", error);
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
