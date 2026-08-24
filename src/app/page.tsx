@@ -29,11 +29,9 @@ import {
 
 const RichTextComposer = dynamic(() => import("../components/RichTextComposer"), { ssr: false });
 
-
-// Mock CSV / Spreadsheet text to pre-load so the user can easily test
+// Empty by default — paste real CSV or sync from Google Sheets
 const DEFAULT_SHEETS_CSV = `Reference No,Serial No,Mark Name,Filing Date,Email,CC,BCC,Subject,Template,Attachment
-REF-2026-1011,90213423,NEXUS PRIME DRONES,2026-03-01,operator@nexusprime.test,finance@nexusprime.test,,Trademark Status Urgent Alert for NEXUS PRIME DRONES - Serial #90213423,1,Trademark_Guide.pdf
-REF-2026-5592,88432104,OMNIVERSE SOFTWARE LLC,2026-01-20,ceo@omniverse-soft.test,legal@omniverse-soft.test,,Trademark Advisory Notice for OMNIVERSE SOFTWARE LLC - Serial #88432104,1,Official_Filing_Summary.pdf
+`;
 REF-2026-8812,91230491,ZENITH ORGANICS INC,2025-12-15,admin@zenithorganics.test,,,Advisory: Trademark Renewal is Due for ZENITH ORGANICS INC - Serial #91230491,2,Renewal_Instructions.pdf`;
 
 export default function EmailAutomationDashboard() {
@@ -205,7 +203,7 @@ const quillFormats = [
 
 
   // Spreadsheet Simulator text State
-  const [spreadsheetText, setSpreadsheetText] = useState(DEFAULT_SHEETS_CSV);
+  const [spreadsheetText, setSpreadsheetText] = useState("");
   const [importCampaignId, setImportCampaignId] = useState("1");
 
   // Worker Auto-Runner State
