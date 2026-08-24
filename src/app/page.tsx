@@ -1,4 +1,3 @@
-
 "use client";
 
 import React, { useState, useEffect } from "react";
@@ -461,64 +460,8 @@ const quillFormats = [
     }
   };
 
-  // Import from CSV sheet
+  // Import from CSV / Live Google Sheet
   const parseCsvLine = (line: string): string[] => {
-    const result: string[] = [];
-    let current = "";
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i++) {
-      const char = line[i];
-      if (char === '"') {
-        if (inQuotes && line[i + 1] === '"') {
-          current += '"';
-          i++;
-        } else {
-          inQuotes = !inQuotes;
-        }
-      } else if (char === "," && !inQuotes) {
-        result.push(current.trim());
-        current = "";
-      } else {
-        current += char;
-      }
-    }
-    result.push(current.trim());
-    return result;
-  };
-
-  const HEADER_MAP: Record<string, string> = {
-    "reference no": "referenceNo",
-    "reference_no": "referenceNo",
-    "ref no": "referenceNo",
-    "ref": "referenceNo",
-    "serial no": "serialNo",
-    "serial_no": "serialNo",
-    "serial": "serialNo",
-    "mark name": "markName",
-    "mark_name": "markName",
-    "mark": "markName",
-    "trademark": "markName",
-    "filing date": "filingDate",
-    "filing_date": "filingDate",
-    "date": "filingDate",
-    "email": "email",
-    "e-mail": "email",
-    "email address": "email",
-    "to": "email",
-    "cc": "cc",
-    "bcc": "bcc",
-    "subject": "subject",
-    "template": "templateId",
-    "template id": "templateId",
-    "template_id": "templateId",
-    "template name": "templateName",
-    "attachment": "attachment",
-  };
-
-  const normalizeHeader = (h: string) =>
-    h.replace(/^\uFEFF/, "").trim().toLowerCase().replace(/\s+/g, " ");
-
-    const parseCsvLine = (line: string): string[] => {
     const result: string[] = [];
     let current = "";
     let inQuotes = false;
@@ -670,35 +613,7 @@ const quillFormats = [
       setLoading(false);
     }
   };
-  const handleImportFromLiveGoogleSheet = async () => {
-    try {
-      setLoading(true);
-      setErrorMsg("");
-      setSuccessMsg("");
 
-      const res = await fetch("/api/queue", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "import" }),
-      });
-
-      const data = await res.json();
-      if (data.success) {
-        showSuccess(
-          data.message ||
-            `Live Sheet: Imported ${data.imported ?? data.count ?? 0}, skipped ${data.skipped ?? 0}`
-        );
-        loadDashboardData();
-        setActiveTab("dashboard");
-      } else {
-        showError(data.error || "Live Google Sheet failed. Check .env");
-      }
-    } catch (err: any) {
-      showError(err.message || "Network error");
-    } finally {
-      setLoading(false);
-    }
-  };
   // Gmail account operations
   const handleSaveGmail = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -4374,4 +4289,3 @@ readOnly={gmailForm.provider !== "custom" && gmailForm.provider !== "cpanel"}
     </div>
   );
 }
-
