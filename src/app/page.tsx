@@ -462,41 +462,101 @@ const quillFormats = [
   };
 
   // Import from CSV sheet
+  const parseCsvLine = (line: string): string[] => {
+    const result: string[] = [];
+    let current = "";
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      if (char === '"') {
+        if (inQuotes && line[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (char === "," && !inQuotes) {
+        result.push(current.trim());
+        current = "";
+      } else {
+        current += char;
+      }
+    }
+    result.push(current.trim());
+    return result;
+  };
+
+  const HEADER_MAP: Record<string, string> = {
+    "reference no": "referenceNo",
+    "reference_no": "referenceNo",
+    "ref no": "referenceNo",
+    "ref": "referenceNo",
+    "serial no": "serialNo",
+    "serial_no": "serialNo",
+    "serial": "serialNo",
+    "mark name": "markName",
+    "mark_name": "markName",
+    "mark": "markName",
+    "trademark": "markName",
+    "filing date": "filingDate",
+    "filing_date": "filingDate",
+    "date": "filingDate",
+    "email": "email",
+    "e-mail": "email",
+    "email address": "email",
+    "to": "email",
+    "cc": "cc",
+    "bcc": "bcc",
+    "subject": "subject",
+    "template": "templateId",
+    "template id": "templateId",
+    "template_id": "templateId",
+    "template name": "templateName",
+    "attachment": "attachment",
+  };
+
+  const normalizeHeader = (h: string) =>
+    h.replace(/^\uFEFF/, "").trim().toLowerCase().replace(/\s+/g, " ");
+
   const handleImportSheet = async () => {
     try {
       setLoading(true);
       setErrorMsg("");
       setSuccessMsg("");
 
-      // Simple CSV parser
-      const lines = spreadsheetText.trim().split("\n");
+      const lines = spreadsheetText
+        .trim()
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+
       if (lines.length < 2) {
-        showError("Invalid spreadsheet format. Need a header row and at least one data row.");
+        showError("Invalid spreadsheet. Header + at least 1 data row required.");
         return;
       }
 
-      const headers = lines[0].split(",").map(h => h.trim());
-      const items = [];
+      const rawHeaders = parseCsvLine(lines[0]);
+      const mappedKeys = rawHeaders.map((h) => HEADER_MAP[normalizeHeader(h)] || null);
 
+      if (!mappedKeys.includes("email")) {
+        showError("Email column not found. Headers: " + rawHeaders.join(", "));
+        return;
+      }
+
+      const items: any[] = [];
       for (let i = 1; i < lines.length; i++) {
-        const currentLine = lines[i].split(",").map(val => val.trim());
-        if (currentLine.length < headers.length) continue;
-
+        const cols = parseCsvLine(lines[i]);
+        if (cols.every((c) => !c)) continue;
         const obj: any = {};
-        headers.forEach((header, index) => {
-          // Map headers correctly
-          if (header === "Reference No") obj.referenceNo = currentLine[index];
-          else if (header === "Serial No") obj.serialNo = currentLine[index];
-          else if (header === "Mark Name") obj.markName = currentLine[index];
-          else if (header === "Filing Date") obj.filingDate = currentLine[index];
-          else if (header === "Email") obj.email = currentLine[index];
-          else if (header === "CC") obj.cc = currentLine[index];
-          else if (header === "BCC") obj.bcc = currentLine[index];
-          else if (header === "Subject") obj.subject = currentLine[index];
-          else if (header === "Template") obj.templateId = currentLine[index];
-          else if (header === "Attachment") obj.attachment = currentLine[index];
+        mappedKeys.forEach((key, idx) => {
+          if (key && cols[idx] !== undefined) obj[key] = cols[idx];
         });
-        items.push(obj);
+        if (obj.email && String(obj.email).trim()) items.push(obj);
+      }
+
+      if (items.length === 0) {
+        showError("No valid rows (Email required).");
+        return;
       }
 
       const res = await fetch("/api/queue", {
@@ -504,30 +564,56 @@ const quillFormats = [
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "import",
-          items: items,
-          campaignId: importCampaignId
+          items,
+          campaignId: importCampaignId || null,
         }),
+      });
+
+      const data = await res.json();
+      if (data.success) {
+        showSuccess(data.message || `Imported ${data.count} rows`);
+        setSpreadsheetText("");
+        loadDashboardData();
+        setActiveTab("dashboard");
+      } else {
+        showError(data.error || "Import failed");
+      }
+    } catch (err: any) {
+      showError(err.message || "Failed to import");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleImportFromLiveGoogleSheet = async () => {
+    try {
+      setLoading(true);
+      setErrorMsg("");
+      setSuccessMsg("");
+
+      const res = await fetch("/api/queue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "import" }),
       });
 
       const data = await res.json();
       if (data.success) {
         showSuccess(
           data.message ||
-            `Successfully imported ${data.count} items${data.templateId ? ` (template #${data.templateId})` : ""} into the queue!`
+            `Live Sheet: Imported ${data.imported ?? data.count ?? 0}, skipped ${data.skipped ?? 0}`
         );
-        setSpreadsheetText("");
         loadDashboardData();
         setActiveTab("dashboard");
       } else {
-        showError(data.error);
+        showError(data.error || "Live Google Sheet failed. Check .env");
       }
     } catch (err: any) {
-      showError(err.message || "Failed to parse and import sheet records.");
+      showError(err.message || "Network error");
     } finally {
       setLoading(false);
     }
   };
-
   // Gmail account operations
   const handleSaveGmail = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2650,21 +2736,33 @@ const handleAttachmentUpload = async (
                   disabled={loading}
                   className="bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-bold text-sm px-6 py-2.5 rounded-xl transition shadow-lg shadow-emerald-600/15"
                 >
-                  Import Rows to Send Queue
+                                <div className="flex justify-between items-center gap-3 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setSpreadsheetText(DEFAULT_SHEETS_CSV)}
+                  className="text-xs text-slate-400 hover:text-white underline"
+                >
+                  Reset Header Only
                 </button>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={handleImportFromLiveGoogleSheet}
+                    disabled={loading}
+                    className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-sm px-5 py-2.5 rounded-xl disabled:opacity-50"
+                  >
+                    Import from Live Google Sheet
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleImportSheet}
+                    disabled={loading}
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm px-6 py-2.5 rounded-xl disabled:opacity-50"
+                  >
+                    Import Pasted CSV to Queue
+                  </button>
+                </div>
               </div>
-            </div>
-
-            {/* Instruction block */}
-            <div className="bg-slate-950/40 border border-slate-800 p-5 rounded-xl space-y-2">
-              <h4 className="text-sm font-semibold text-white">How the Sheet Rotation Flow Works:</h4>
-              <ul className="list-disc pl-5 text-xs text-slate-400 space-y-1">
-                <li>Under general configuration, the Gmail rotator script parses these imported rows sequentially.</li>
-                <li>Each recipient's dynamic variables such as <code className="text-blue-300 font-mono">{"{{mark_name}}"}</code>, <code className="text-blue-300 font-mono">{"{{serial_no}}"}</code>, and <code className="text-blue-300 font-mono">{"{{reference_no}}"}</code> are automatically evaluated dynamically.</li>
-                <li>The system tracks sending status, Gmail account used, and individual tracking opens by automatically syncing back state.</li>
-              </ul>
-            </div>
-          </div>
         )}
 
         {/* Tab 3: Gmail Setup */}
