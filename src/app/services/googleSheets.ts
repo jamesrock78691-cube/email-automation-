@@ -28,7 +28,7 @@ const auth = new JWT({
   ],
 });
 
-// ===== AUTO SHEET (Sheet1) =====
+// ===== AUTO SHEET =====
 const autoDoc = new GoogleSpreadsheet(SHEET_ID, auth);
 let autoInitialized = false;
 
@@ -49,8 +49,9 @@ const manualDoc = MANUAL_SHEET_ID
 let manualInitialized = false;
 
 async function getManualSheet() {
-  if (!manualDoc)
+  if (!manualDoc) {
     throw new Error("GOOGLE_MANUAL_LOG_SHEET_ID is missing in .env");
+  }
   if (!manualInitialized) {
     await manualDoc.loadInfo();
     manualInitialized = true;
@@ -79,7 +80,7 @@ export interface GoogleSheetRow {
   gmailUsed: string;
 }
 
-// ========== AUTO SHEET (Sheet1) ==========
+// ========== READ ROWS ==========
 
 export async function readRows(): Promise<GoogleSheetRow[]> {
   const sheet = await getAutoSheet();
@@ -87,16 +88,16 @@ export async function readRows(): Promise<GoogleSheetRow[]> {
 
   return rows.map((row: any) => ({
     rowNumber: row.rowNumber,
-    referenceNo: row.get("reference_no") || "",
-    serialNo: row.get("serial_no") || "",
-    markName: row.get("mark_name") || "",
-    filingDate: row.get("filing_date") || "",
-    email: row.get("Email") || "",
-    cc: row.get("CC") || "",
-    bcc: row.get("BCC") || "",
-    subject: row.get("Subject") || "",
-    templateName: row.get("Template Name") || "",
-    status: row.get("Status") || "",
+    referenceNo: row.get("reference_no") || row.get("Reference No") || "",
+    serialNo: row.get("serial_no") || row.get("Serial No") || "",
+    markName: row.get("mark_name") || row.get("Mark Name") || "",
+    filingDate: row.get("filing_date") || row.get("Filing Date") || "",
+    email: row.get("Email") || row.get("email") || "",
+    cc: row.get("CC") || row.get("cc") || "",
+    bcc: row.get("BCC") || row.get("bcc") || "",
+    subject: row.get("Subject") || row.get("subject") || "",
+    templateName: row.get("Template Name") || row.get("template_name") || "",
+    status: row.get("Status") || row.get("status") || "",
     sentAt: row.get("Sent At") || "",
     openedAt: row.get("Opened At") || "",
     openCount: row.get("Open Count") || "",
@@ -126,6 +127,8 @@ export async function updateRow(
   await row.save();
 }
 
+// ========== PENDING FILTER (SOFT) ==========
+
 export async function getPendingRows() {
   const rows = await readRows();
 
@@ -133,33 +136,28 @@ export async function getPendingRows() {
   rows.forEach((row, index) => console.log("ROW", index + 1, row));
 
   const pendingRows = rows.filter((row) => {
-    return (
-      row.referenceNo.trim() !== "" &&
-      row.serialNo.trim() !== "" &&
-      row.markName.trim() !== "" &&
-      row.filingDate.trim() !== "" &&
-      row.email.trim() !== "" &&
-      row.subject.trim() !== "" &&
-      (row.status.trim() === "" || row.status.toLowerCase() === "pending")
-    );
+    const email = (row.email || "").trim();
+    if (!email) return false;
+
+    const status = (row.status || "").trim().toLowerCase();
+    // Skip already processed
+    if (["sent", "failed", "imported", "done", "completed"].includes(status)) {
+      return false;
+    }
+    // empty / pending / anything else → import
+    return true;
   });
 
   console.log("PENDING ROWS:", pendingRows.length);
   return pendingRows;
 }
 
-/**
- * Import pending Google Sheet rows into queue.
- * - campaignId is always null (no hard-coded FK)
- * - templateId only set if template exists in DB
- * - duplicate serialNo skipped
- * - trackingId always unique
- */
+// ========== IMPORT TO QUEUE (FIXED) ==========
+
 export async function importPendingRowsToQueue() {
   const rows = await getPendingRows();
   console.log("TOTAL ROWS TO IMPORT:", rows.length);
 
-  // Load all templates once
   const allTemplates = await db.select().from(templates);
   const templatesByName = new Map(
     allTemplates.map((t) => [t.name.trim().toLowerCase(), t.id])
@@ -173,19 +171,24 @@ export async function importPendingRowsToQueue() {
 
   for (const row of rows) {
     try {
-      // Skip if already in queue (same serial)
-      const existing = await db
-        .select()
-        .from(queue)
-        .where(eq(queue.serialNo, row.serialNo))
-        .limit(1);
+      const serial =
+        (row.serialNo || "").trim() ||
+        `AUTO-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 
-      if (existing.length > 0) {
-        skipped++;
-        continue;
+      // Skip duplicate serial in queue
+      if (row.serialNo && row.serialNo.trim()) {
+        const existing = await db
+          .select()
+          .from(queue)
+          .where(eq(queue.serialNo, row.serialNo.trim()))
+          .limit(1);
+        if (existing.length > 0) {
+          skipped++;
+          continue;
+        }
       }
 
-      // Resolve template by name if sheet has "Template Name"
+      // Template by name, else first template, else null
       let templateId: number | null = null;
       if (row.templateName && row.templateName.trim()) {
         const found = templatesByName.get(
@@ -201,33 +204,29 @@ export async function importPendingRowsToQueue() {
         (row.trackingId && row.trackingId.trim()) || randomUUID();
 
       await db.insert(queue).values({
-        campaignId: null, // FIXED: never hard-code campaign id 1
-        referenceNo: row.referenceNo || "",
-        serialNo: row.serialNo || "",
-        markName: row.markName || "",
-        filingDate: row.filingDate || "",
+        campaignId: null, // never hard-code campaign 1
+        referenceNo: (row.referenceNo || "").trim() || "N/A",
+        serialNo: serial,
+        markName: (row.markName || "").trim() || "N/A",
+        filingDate:
+          (row.filingDate || "").trim() ||
+          new Date().toISOString().slice(0, 10),
         email: row.email.trim(),
-        cc: row.cc ? row.cc : null,
-        bcc: row.bcc ? row.bcc : null,
-        subject: row.subject || "Trademark Notice",
-        templateId, // null-safe if no templates in DB
+        cc: row.cc ? row.cc.trim() : null,
+        bcc: row.bcc ? row.bcc.trim() : null,
+        subject: (row.subject || "").trim() || "Trademark Notice",
+        templateId,
         status: "pending",
         trackingId,
         tries: 0,
         maxTries: 3,
       });
 
-      // Optional: mark sheet row as imported
-      // await updateRow(row.rowNumber, {
-      //   status: "Imported",
-      //   trackingId,
-      // });
-
       imported++;
     } catch (err: any) {
-      console.error("Import row error:", row.serialNo, err);
+      console.error("Import row error:", row.email, err);
       errors.push(
-        `${row.serialNo || row.email}: ${err?.cause?.message || err?.message || "insert failed"}`
+        `${row.email}: ${err?.cause?.message || err?.message || "insert failed"}`
       );
     }
   }
@@ -243,7 +242,7 @@ export async function importPendingRowsToQueue() {
   };
 }
 
-// ========== MANUAL SENT LOG SHEET ==========
+// ========== MANUAL SENT LOG ==========
 
 export interface ManualLogRow {
   referenceNo?: string;
@@ -263,11 +262,6 @@ export interface ManualLogRow {
   trackingId?: string;
 }
 
-/**
- * Compose se email bhejne ke baad Manual Sent Log sheet mein naya row add karta hai
- * Headers: reference_no, serial_no, mark_name, filing_date, Email, CC, BCC, Subject,
- *          Template Name, Status, Sent At, Gmail Used, Sent By, Sent By ID, Tracking ID
- */
 export async function appendManualSentLog(data: ManualLogRow) {
   try {
     if (!MANUAL_SHEET_ID) {
