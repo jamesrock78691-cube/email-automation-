@@ -28,7 +28,6 @@ const auth = new JWT({
   ],
 });
 
-// ===== AUTO SHEET =====
 const autoDoc = new GoogleSpreadsheet(SHEET_ID, auth);
 let autoInitialized = false;
 
@@ -42,7 +41,6 @@ async function getAutoSheet() {
   return sheet;
 }
 
-// ===== MANUAL LOG SHEET =====
 const manualDoc = MANUAL_SHEET_ID
   ? new GoogleSpreadsheet(MANUAL_SHEET_ID, auth)
   : null;
@@ -79,8 +77,6 @@ export interface GoogleSheetRow {
   trackingId: string;
   gmailUsed: string;
 }
-
-// ========== READ ROWS ==========
 
 export async function readRows(): Promise<GoogleSheetRow[]> {
   const sheet = await getAutoSheet();
@@ -127,8 +123,6 @@ export async function updateRow(
   await row.save();
 }
 
-// ========== PENDING FILTER (SOFT) ==========
-
 export async function getPendingRows() {
   const rows = await readRows();
 
@@ -140,19 +134,15 @@ export async function getPendingRows() {
     if (!email) return false;
 
     const status = (row.status || "").trim().toLowerCase();
-    // Skip already processed
     if (["sent", "failed", "imported", "done", "completed"].includes(status)) {
       return false;
     }
-    // empty / pending / anything else → import
     return true;
   });
 
   console.log("PENDING ROWS:", pendingRows.length);
   return pendingRows;
 }
-
-// ========== IMPORT TO QUEUE (FIXED) ==========
 
 export async function importPendingRowsToQueue() {
   const rows = await getPendingRows();
@@ -175,7 +165,6 @@ export async function importPendingRowsToQueue() {
         (row.serialNo || "").trim() ||
         `AUTO-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 
-      // Skip duplicate serial in queue
       if (row.serialNo && row.serialNo.trim()) {
         const existing = await db
           .select()
@@ -188,7 +177,6 @@ export async function importPendingRowsToQueue() {
         }
       }
 
-      // Template by name, else first template, else null
       let templateId: number | null = null;
       if (row.templateName && row.templateName.trim()) {
         const found = templatesByName.get(
@@ -204,7 +192,7 @@ export async function importPendingRowsToQueue() {
         (row.trackingId && row.trackingId.trim()) || randomUUID();
 
       await db.insert(queue).values({
-        campaignId: null, // never hard-code campaign 1
+        campaignId: null,
         referenceNo: (row.referenceNo || "").trim() || "N/A",
         serialNo: serial,
         markName: (row.markName || "").trim() || "N/A",
@@ -241,8 +229,6 @@ export async function importPendingRowsToQueue() {
     }`,
   };
 }
-
-// ========== MANUAL SENT LOG ==========
 
 export interface ManualLogRow {
   referenceNo?: string;
