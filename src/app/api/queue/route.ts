@@ -1,3 +1,5 @@
+// ========== PASTE 4: src/app/api/queue/route.ts — poori file overwrite ==========
+
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { queue, templates, campaigns } from "@/db/schema";
@@ -6,15 +8,12 @@ import { randomUUID } from "crypto";
 import { processNextQueueItem } from "@/app/services/emailSender";
 import { importPendingRowsToQueue } from "@/app/services/googleSheets";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
     const list = await db.select().from(queue).orderBy(desc(queue.createdAt));
     return NextResponse.json({ success: true, list });
   } catch (error: any) {
-    return NextResponse.json(
-      { success: false, error: error.message },
-      { status: 500 }
-    );
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 }
 
@@ -36,7 +35,6 @@ export async function POST(request: NextRequest) {
       const results = [];
       let successCount = 0;
       let failCount = 0;
-
       for (let i = 0; i < 10; i++) {
         const res = await processNextQueueItem(baseUrl);
         if (!res.success && res.error?.includes("No pending emails")) break;
@@ -44,10 +42,9 @@ export async function POST(request: NextRequest) {
         if (res.success) successCount++;
         else failCount++;
       }
-
       return NextResponse.json({
         success: true,
-        summary: `Processed ${results.length}. Sent: ${successCount}, Failed: ${failCount}.`,
+        summary: `Processed ${results.length} items. Sent: ${successCount}, Failed: ${failCount}.`,
         results,
       });
     }
@@ -64,33 +61,20 @@ export async function POST(request: NextRequest) {
         let campaignTemplateId: number | null = null;
         let campaignSubject: string | null = null;
 
-        const cid =
-          campaignId != null && campaignId !== ""
-            ? Number(campaignId)
-            : null;
-
+        const cid = campaignId != null && campaignId !== "" ? Number(campaignId) : null;
         if (cid && !Number.isNaN(cid)) {
-          const camps = await db
-            .select()
-            .from(campaigns)
-            .where(eq(campaigns.id, cid))
-            .limit(1);
-          if (camps.length) {
+          const camps = await db.select().from(campaigns).where(eq(campaigns.id, cid)).limit(1);
+          if (camps.length > 0) {
             validCampaignId = camps[0].id;
-            if (
-              camps[0].templateId &&
-              validTemplateIds.has(camps[0].templateId)
-            ) {
+            if (camps[0].templateId && validTemplateIds.has(camps[0].templateId)) {
               campaignTemplateId = camps[0].templateId;
-              campaignSubject =
-                allTemplates.find((t) => t.id === campaignTemplateId)
-                  ?.subject || null;
+              const tpl = allTemplates.find((t) => t.id === campaignTemplateId);
+              campaignSubject = tpl?.subject || null;
             }
           }
         }
 
-        const fallbackTemplateId =
-          campaignTemplateId ?? (firstTemplate ? firstTemplate.id : null);
+        const fallbackTemplateId = campaignTemplateId ?? (firstTemplate ? firstTemplate.id : null);
 
         const rows = items
           .filter((it: any) => it?.email && String(it.email).trim())
@@ -98,32 +82,20 @@ export async function POST(request: NextRequest) {
             let rowTemplateId: number | null = null;
             if (it.templateId != null && it.templateId !== "") {
               const tid = Number(it.templateId);
-              if (!Number.isNaN(tid) && validTemplateIds.has(tid)) {
-                rowTemplateId = tid;
-              }
+              if (!Number.isNaN(tid) && validTemplateIds.has(tid)) rowTemplateId = tid;
             }
             if (rowTemplateId == null) rowTemplateId = fallbackTemplateId;
 
             return {
               campaignId: validCampaignId,
-              referenceNo:
-                String(it.referenceNo ?? it.reference_no ?? "") || "N/A",
-              serialNo:
-                String(it.serialNo ?? it.serial_no ?? "") ||
-                `AUTO-${randomUUID().slice(0, 8)}`,
-              markName: String(it.markName ?? it.mark_name ?? "") || "N/A",
-              filingDate:
-                String(it.filingDate ?? it.filing_date ?? "") ||
-                new Date().toISOString().slice(0, 10),
+              referenceNo: String(it.referenceNo ?? it.reference_no ?? ""),
+              serialNo: String(it.serialNo ?? it.serial_no ?? ""),
+              markName: String(it.markName ?? it.mark_name ?? ""),
+              filingDate: String(it.filingDate ?? it.filing_date ?? ""),
               email: String(it.email).trim(),
               cc: it.cc ? String(it.cc) : null,
               bcc: it.bcc ? String(it.bcc) : null,
-              subject: String(
-                it.subject ||
-                  campaignSubject ||
-                  firstTemplate?.subject ||
-                  "Trademark Notice"
-              ),
+              subject: String(it.subject || campaignSubject || firstTemplate?.subject || "Trademark Notice"),
               templateId: rowTemplateId,
               trackingId: randomUUID(),
               status: "pending" as const,
@@ -133,26 +105,14 @@ export async function POST(request: NextRequest) {
           });
 
         if (!rows.length) {
-          return NextResponse.json(
-            { success: false, error: "No valid rows (Email required)" },
-            { status: 400 }
-          );
+          return NextResponse.json({ success: false, error: "No valid rows (Email column required)" }, { status: 400 });
         }
 
         try {
           await db.insert(queue).values(rows);
         } catch (insertErr: any) {
-          return NextResponse.json(
-            {
-              success: false,
-              error:
-                insertErr?.cause?.message ||
-                insertErr?.message ||
-                "Insert failed",
-              detail: String(insertErr?.cause || insertErr),
-            },
-            { status: 500 }
-          );
+          const msg = insertErr?.cause?.message || insertErr?.message || "Failed to insert into queue";
+          return NextResponse.json({ success: false, error: msg }, { status: 500 });
         }
 
         return NextResponse.json({
@@ -160,56 +120,34 @@ export async function POST(request: NextRequest) {
           count: rows.length,
           campaignId: validCampaignId,
           templateId: fallbackTemplateId,
-          message: `Imported ${rows.length} rows successfully`,
+          message: `Imported ${rows.length} rows using campaign template #${fallbackTemplateId ?? "N/A"}`,
         });
       }
 
       try {
         const result = await importPendingRowsToQueue();
         return NextResponse.json(result);
-      } catch (e: any) {
-        return NextResponse.json(
-          { success: false, error: e?.message || "Sheets import failed" },
-          { status: 500 }
-        );
+      } catch (sheetErr: any) {
+        return NextResponse.json({ success: false, error: sheetErr?.message || "Sheets import failed" }, { status: 500 });
       }
     }
 
     if (action === "reset_all") {
       await db
         .update(queue)
-        .set({
-          status: "pending",
-          tries: 0,
-          errorMessage: null,
-          gmailUsedId: null,
-          gmailUsedEmail: null,
-          sentAt: null,
-        })
+        .set({ status: "pending", tries: 0, errorMessage: null, gmailUsedId: null, gmailUsedEmail: null, sentAt: null })
         .where(eq(queue.status, "failed"));
-      return NextResponse.json({
-        success: true,
-        message: "Failed emails reset to pending.",
-      });
+      return NextResponse.json({ success: true, message: "Only failed emails have been reset to pending status." });
     }
 
     if (action === "clear_all") {
       await db.delete(queue);
-      return NextResponse.json({
-        success: true,
-        message: "Queue cleared.",
-      });
+      return NextResponse.json({ success: true, message: "Queue database tables cleared successfully." });
     }
 
-    return NextResponse.json(
-      { success: false, error: "Invalid action" },
-      { status: 400 }
-    );
+    return NextResponse.json({ success: false, error: "Invalid queue control action specified." }, { status: 400 });
   } catch (error: any) {
-    console.error("Queue route error:", error);
-    return NextResponse.json(
-      { success: false, error: error.message },
-      { status: 500 }
-    );
+    console.error("Queue control route error:", error);
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 }
