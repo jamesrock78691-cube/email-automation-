@@ -9,11 +9,11 @@ import bcrypt from "bcryptjs";
 const SUPER_ADMIN_RECOVERY_EMAIL =
   process.env.SUPER_ADMIN_RECOVERY_EMAIL || "jamesrock78691@gmail.com";
 
-const SECRET = process.env.AUTH_SECRET;
-
-if (!SECRET) {
-  throw new Error("AUTH_SECRET environment variable is required");
-}
+const SECRET: string =
+  process.env.AUTH_SECRET ??
+  (() => {
+    throw new Error("AUTH_SECRET environment variable is required");
+  })();
 
 const SESSION_DAYS = 7;
 
