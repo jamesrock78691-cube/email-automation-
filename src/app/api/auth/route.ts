@@ -371,111 +371,127 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const action = body.action || "login";
 
-    if (action === "login") {
-      const { username, password } = body;
-      if (!username || !password) {
-        return NextResponse.json(
-          { success: false, error: "Username and password required" },
-          { status: 400 }
-        );
+   if (action === "login") {
+  const { username, password } = body;
+  if (!username || !password) {
+    return NextResponse.json(
+      { success: false, error: "Username and password required" },
+      { status: 400 }
+    );
+  }
+
+  const found = await db
+    .select()
+    .from(users)
+    .where(eq(users.username, String(username).trim()))
+    .limit(1);
+
+  if (!found.length) {
+    return NextResponse.json(
+      { success: false, error: "Invalid credentials" },
+      { status: 401 }
+    );
+  }
+
+  const user = found[0];
+  const stored = user.passwordHash || "";
+
+  // Support both bcrypt hash and old plain-text (migration)
+  let passwordMatch = false;
+  if (stored.startsWith("$2a$") || stored.startsWith("$2b$") || stored.startsWith("$2y$")) {
+    passwordMatch = await bcrypt.compare(password, stored);
+  } else {
+    // Legacy plain password — auto-upgrade to bcrypt
+    passwordMatch = stored === password;
+    if (passwordMatch) {
+      try {
+        const newHash = await bcrypt.hash(password, 10);
+        await db
+          .update(users)
+          .set({ passwordHash: newHash })
+          .where(eq(users.id, user.id));
+      } catch (e) {
+        console.error("Failed to upgrade password hash:", e);
       }
-
-      const found = await db
-        .select()
-        .from(users)
-        .where(eq(users.username, String(username).trim()))
-        .limit(1);
-
-            if (!found.length) {
-        return NextResponse.json(
-          { success: false, error: "Invalid credentials" },
-          { status: 401 }
-        );
-      }
-
-      const passwordMatch = await bcrypt.compare(password, found[0].passwordHash);
-      if (!passwordMatch) {
-        return NextResponse.json(
-          { success: false, error: "Invalid credentials" },
-          { status: 401 }
-        );
-      }
-
-      const user = found[0];
-      let role = normalizeRole(user.role);
-      if (
-        user.username === "superadmin" ||
-        user.role === "super_admin"
-      ) {
-        role = "super_admin";
-        if (user.role !== "super_admin") {
-          try {
-            await db
-              .update(users)
-              .set({ role: "super_admin" })
-              .where(eq(users.id, user.id));
-          } catch {}
-        }
-      }
-      // Keep explicit "admin" role as admin (not auto-promote to super_admin)
-      // Only username "superadmin" or role super_admin → super_admin
-
-      // Panel restriction: operator panel vs admin panel
-      const panel = body.panel || "admin";
-      if (panel === "operator" && role !== "operator") {
-        return NextResponse.json(
-          {
-            success: false,
-            error: "This panel is for Operators only. Use Admin / Super Admin login.",
-          },
-          { status: 403 }
-        );
-      }
-      if (panel === "admin" && role === "operator") {
-        return NextResponse.json(
-          {
-            success: false,
-            error: "Operators must use the Operator login panel.",
-          },
-          { status: 403 }
-        );
-      }
-
-      const token = createToken({
-        id: user.id,
-        username: user.username,
-        role,
-      });
-
-      const permMap = await getPermissionsMap();
-      const permissions = resolvePermissions(user.id, role, permMap);
-      const statsMap = await getAgentStatsMap();
-      const myStats = statsMap[String(user.id)] || {
-        totalSent: 0,
-        sentToday: 0,
-        dailyLimit: 100,
-      };
-
-      const res = NextResponse.json({
-        success: true,
-        token,
-        user: {
-          id: user.id,
-          username: user.username,
-          role,
-          permissions,
-          stats: myStats,
-        },
-      });
-      res.cookies.set("ea_session", token, {
-        httpOnly: true,
-        path: "/",
-        maxAge: SESSION_DAYS * 24 * 60 * 60,
-        sameSite: "lax",
-      });
-      return res;
     }
+  }
 
+  if (!passwordMatch) {
+    return NextResponse.json(
+      { success: false, error: "Invalid credentials" },
+      { status: 401 }
+    );
+  }
+
+  let role = normalizeRole(user.role);
+  if (user.username === "superadmin" || user.role === "super_admin") {
+    role = "super_admin";
+    if (user.role !== "super_admin") {
+      try {
+        await db
+          .update(users)
+          .set({ role: "super_admin" })
+          .where(eq(users.id, user.id));
+      } catch {}
+    }
+  }
+
+  // Panel restriction
+  const panel = body.panel || "admin";
+  if (panel === "operator" && role !== "operator") {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "This panel is for Operators only. Use Admin / Super Admin login.",
+      },
+      { status: 403 }
+    );
+  }
+  if (panel === "admin" && role === "operator") {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "Operators must use the Operator login panel.",
+      },
+      { status: 403 }
+    );
+  }
+
+  const token = createToken({
+    id: user.id,
+    username: user.username,
+    role,
+  });
+
+  const permMap = await getPermissionsMap();
+  const permissions = resolvePermissions(user.id, role, permMap);
+  const statsMap = await getAgentStatsMap();
+  const myStats = statsMap[String(user.id)] || {
+    totalSent: 0,
+    sentToday: 0,
+    dailyLimit: 100,
+  };
+
+  const res = NextResponse.json({
+    success: true,
+    token,
+    user: {
+      id: user.id,
+      username: user.username,
+      role,
+      permissions,
+      stats: myStats,
+    },
+  });
+  res.cookies.set("ea_session", token, {
+    httpOnly: true,
+    path: "/",
+    maxAge: SESSION_DAYS * 24 * 60 * 60,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+  });
+  return res;
+}
     if (action === "logout") {
       const res = NextResponse.json({ success: true });
       res.cookies.set("ea_session", "", {
