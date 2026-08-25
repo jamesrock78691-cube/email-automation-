@@ -1,6 +1,7 @@
 import { db } from "./index";
 import { users, gmailAccounts, templates, campaigns, queue, settings } from "./schema";
 import { eq } from "drizzle-orm";
+import bcrypt from "bcryptjs";
 
 export async function seedDatabase() {
   try {
@@ -10,7 +11,7 @@ export async function seedDatabase() {
       console.log("Seeding database with default admin user...");
       await db.insert(users).values({
         username: "admin",
-        passwordHash: "admin123", // For simple direct or hash login in this production V1
+        passwordHash: await bcrypt.hash("admin123", 10),, // For simple direct or hash login in this production V1
         role: "admin",
       });
     }
@@ -126,39 +127,12 @@ export async function seedDatabase() {
       });
     }
 
-    // Check gmail_accounts
+      // Check gmail_accounts — no dummy accounts in production
+    // Add real SMTP accounts from the dashboard instead
     const existingAccounts = await db.select().from(gmailAccounts).limit(1);
     if (existingAccounts.length === 0) {
-  console.log("Seeding default Gmail accounts for rotation...");
-
-  await db.insert(gmailAccounts).values({
-    email: "rotator1@gmail.com",
-    appPassword: "abcd efgh ijkl mnop",
-    smtpHost: "smtp.gmail.com",
-    smtpPort: 465,
-    secure: true,
-    priority: 2,
-    dailyLimit: 300,
-    minuteLimit: 30,
-    sentToday: 0,
-    sentThisMinute: 0,
-    status: "enabled",
-  });
-
-  await db.insert(gmailAccounts).values({
-    email: "rotator2@gmail.com",
-    appPassword: "qrst uvwx yzab cdef",
-    smtpHost: "smtp.gmail.com",
-    smtpPort: 465,
-    secure: true,
-    priority: 1,
-    dailyLimit: 200,
-    minuteLimit: 20,
-    sentToday: 0,
-    sentThisMinute: 0,
-    status: "enabled",
-  });
-}
+      console.log("No Gmail/SMTP accounts found. Add them from the dashboard.");
+    }
 
     // Check campaigns
     const existingCampaigns = await db.select().from(campaigns).limit(1);
