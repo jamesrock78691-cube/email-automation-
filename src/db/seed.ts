@@ -11,7 +11,7 @@ export async function seedDatabase() {
       console.log("Seeding database with default admin user...");
       await db.insert(users).values({
         username: "admin",
-        passwordHash: await bcrypt.hash("admin123", 10),, // For simple direct or hash login in this production V1
+        passwordHash: await bcrypt.hash("admin123", 10), // For simple direct or hash login in this production V1
         role: "admin",
       });
     }
