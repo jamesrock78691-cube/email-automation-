@@ -6,56 +6,79 @@ import { db } from "@/db";
 import { queue, templates } from "@/db/schema";
 import { eq } from "drizzle-orm";
 
-const SHEET_ID = process.env.GOOGLE_SHEET_ID!;
-const SHEET_NAME = process.env.GOOGLE_SHEET_NAME!;
-const MANUAL_SHEET_ID = process.env.GOOGLE_MANUAL_LOG_SHEET_ID!;
+const SHEET_ID = process.env.GOOGLE_SHEET_ID || "";
+const SHEET_NAME = process.env.GOOGLE_SHEET_NAME || "";
+const MANUAL_SHEET_ID = process.env.GOOGLE_MANUAL_LOG_SHEET_ID || "";
 const MANUAL_SHEET_NAME =
   process.env.GOOGLE_MANUAL_LOG_SHEET_NAME || "Manual Sent Log";
-const CREDS = process.env.GOOGLE_SHEETS_CREDENTIALS_JSON!;
+const CREDS = process.env.GOOGLE_SHEETS_CREDENTIALS_JSON || "";
 
-if (!SHEET_ID) throw new Error("GOOGLE_SHEET_ID is missing in .env");
-if (!SHEET_NAME) throw new Error("GOOGLE_SHEET_NAME is missing in .env");
-if (!CREDS) throw new Error("GOOGLE_SHEETS_CREDENTIALS_JSON is missing in .env");
-
-const credentials = JSON.parse(CREDS);
-
-const auth = new JWT({
-  email: credentials.client_email,
-  key: credentials.private_key,
-  scopes: [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-  ],
-});
-
-const autoDoc = new GoogleSpreadsheet(SHEET_ID, auth);
+let autoDoc: GoogleSpreadsheet | null = null;
 let autoInitialized = false;
+let manualDoc: GoogleSpreadsheet | null = null;
+let manualInitialized = false;
+let auth: JWT | null = null;
+
+function ensureAuth() {
+  if (!CREDS) {
+    throw new Error(
+      "GOOGLE_SHEETS_CREDENTIALS_JSON is missing in Vercel env. Add service account JSON."
+    );
+  }
+  if (!auth) {
+    const credentials = JSON.parse(CREDS);
+    if (credentials.private_key && typeof credentials.private_key === "string") {
+      credentials.private_key = credentials.private_key.replace(/\\n/g, "\n");
+    }
+    auth = new JWT({
+      email: credentials.client_email,
+      key: credentials.private_key,
+      scopes: [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+      ],
+    });
+  }
+  return auth;
+}
 
 async function getAutoSheet() {
+  if (!SHEET_ID) throw new Error("GOOGLE_SHEET_ID is missing in Vercel env");
+  if (!SHEET_NAME) throw new Error("GOOGLE_SHEET_NAME is missing in Vercel env");
+  const jwt = ensureAuth();
+  if (!autoDoc) {
+    autoDoc = new GoogleSpreadsheet(SHEET_ID, jwt);
+  }
   if (!autoInitialized) {
     await autoDoc.loadInfo();
     autoInitialized = true;
   }
   const sheet = autoDoc.sheetsByTitle[SHEET_NAME];
-  if (!sheet) throw new Error(`Sheet "${SHEET_NAME}" not found.`);
+  if (!sheet) {
+    const names = Object.keys(autoDoc.sheetsByTitle || {}).join(", ");
+    throw new Error(
+      `Sheet tab "${SHEET_NAME}" not found. Available tabs: ${names || "(none)"}`
+    );
+  }
   return sheet;
 }
 
-const manualDoc = MANUAL_SHEET_ID
-  ? new GoogleSpreadsheet(MANUAL_SHEET_ID, auth)
-  : null;
-let manualInitialized = false;
-
 async function getManualSheet() {
+  if (!MANUAL_SHEET_ID) {
+    throw new Error("GOOGLE_MANUAL_LOG_SHEET_ID is missing in Vercel env");
+  }
+  const jwt = ensureAuth();
   if (!manualDoc) {
-    throw new Error("GOOGLE_MANUAL_LOG_SHEET_ID is missing in .env");
+    manualDoc = new GoogleSpreadsheet(MANUAL_SHEET_ID, jwt);
   }
   if (!manualInitialized) {
     await manualDoc.loadInfo();
     manualInitialized = true;
   }
   const sheet = manualDoc.sheetsByTitle[MANUAL_SHEET_NAME];
-  if (!sheet) throw new Error(`Sheet "${MANUAL_SHEET_NAME}" not found.`);
+  if (!sheet) {
+    throw new Error(`Sheet tab "${MANUAL_SHEET_NAME}" not found.`);
+  }
   return sheet;
 }
 
@@ -82,23 +105,50 @@ export async function readRows(): Promise<GoogleSheetRow[]> {
   const sheet = await getAutoSheet();
   const rows = await sheet.getRows();
 
+  const pick = (row: any, ...keys: string[]) => {
+    for (const k of keys) {
+      const v = row.get(k);
+      if (v !== undefined && v !== null && String(v).trim() !== "") {
+        return String(v).trim();
+      }
+    }
+    try {
+      const obj = row.toObject ? row.toObject() : {};
+      const lowerMap: Record<string, string> = {};
+      for (const [hk, hv] of Object.entries(obj)) {
+        lowerMap[String(hk).trim().toLowerCase()] = String(hv ?? "");
+      }
+      for (const k of keys) {
+        const found = lowerMap[k.trim().toLowerCase()];
+        if (found && found.trim()) return found.trim();
+      }
+    } catch {}
+    return "";
+  };
+
   return rows.map((row: any) => ({
     rowNumber: row.rowNumber,
-    referenceNo: row.get("reference_no") || row.get("Reference No") || "",
-    serialNo: row.get("serial_no") || row.get("Serial No") || "",
-    markName: row.get("mark_name") || row.get("Mark Name") || "",
-    filingDate: row.get("filing_date") || row.get("Filing Date") || "",
-    email: row.get("Email") || row.get("email") || "",
-    cc: row.get("CC") || row.get("cc") || "",
-    bcc: row.get("BCC") || row.get("bcc") || "",
-    subject: row.get("Subject") || row.get("subject") || "",
-    templateName: row.get("Template Name") || row.get("template_name") || "",
-    status: row.get("Status") || row.get("status") || "",
-    sentAt: row.get("Sent At") || "",
-    openedAt: row.get("Opened At") || "",
-    openCount: row.get("Open Count") || "",
-    trackingId: row.get("Tracking ID") || "",
-    gmailUsed: row.get("Gmail Used") || "",
+    referenceNo: pick(row, "reference_no", "Reference No", "Reference", "ref"),
+    serialNo: pick(row, "serial_no", "Serial No", "Serial", "serial"),
+    markName: pick(row, "mark_name", "Mark Name", "Mark", "trademark"),
+    filingDate: pick(row, "filing_date", "Filing Date", "Date"),
+    email: pick(row, "Email", "email", "E-mail", "email address", "to"),
+    cc: pick(row, "CC", "cc"),
+    bcc: pick(row, "BCC", "bcc"),
+    subject: pick(row, "Subject", "subject"),
+    templateName: pick(
+      row,
+      "Template Name",
+      "template_name",
+      "Template",
+      "template"
+    ),
+    status: pick(row, "Status", "status"),
+    sentAt: pick(row, "Sent At", "sent_at"),
+    openedAt: pick(row, "Opened At", "opened_at"),
+    openCount: pick(row, "Open Count", "open_count"),
+    trackingId: pick(row, "Tracking ID", "tracking_id", "Tracking Id"),
+    gmailUsed: pick(row, "Gmail Used", "gmail_used"),
   }));
 }
 
@@ -173,6 +223,15 @@ export async function importPendingRowsToQueue() {
           .limit(1);
         if (existing.length > 0) {
           skipped++;
+          const st = (row.status || "").trim().toLowerCase();
+          if (!st || st === "pending") {
+            try {
+              await updateRow(row.rowNumber, {
+                status: "Imported",
+                trackingId: existing[0].trackingId || row.trackingId || "",
+              });
+            } catch {}
+          }
           continue;
         }
       }
@@ -209,6 +268,23 @@ export async function importPendingRowsToQueue() {
         tries: 0,
         maxTries: 3,
       });
+
+      // Sheet pe Status + Tracking ID update
+      try {
+        await updateRow(row.rowNumber, {
+          status: "Imported",
+          trackingId,
+        });
+      } catch (sheetErr: any) {
+        console.error(
+          "Sheet status update failed for row",
+          row.rowNumber,
+          sheetErr?.message || sheetErr
+        );
+        errors.push(
+          `${row.email}: imported to queue but sheet Status update failed (${sheetErr?.message || "error"})`
+        );
+      }
 
       imported++;
     } catch (err: any) {
