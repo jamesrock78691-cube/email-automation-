@@ -460,8 +460,36 @@ const quillFormats = [
     }
   };
 
-  // Import from CSV / Live Google Sheet
-  const parseCsvLine = (line: string): string[] => {
+    // Import from CSV / Google Sheets paste (Tab or Comma)
+  // Google Sheets copy uses TAB between columns; CSV uses comma.
+  const detectDelimiter = (headerLine: string): string => {
+    let tabs = 0;
+    let commas = 0;
+    let inQuotes = false;
+    for (let i = 0; i < headerLine.length; i++) {
+      const c = headerLine[i];
+      if (c === '"') {
+        inQuotes = !inQuotes;
+        continue;
+      }
+      if (inQuotes) continue;
+      if (c === "\t") tabs++;
+      if (c === ",") commas++;
+    }
+    if (tabs > 0 && tabs >= commas) return "\t";
+    if (commas > 0) return ",";
+    if (/\s{2,}/.test(headerLine)) return "SPACES";
+    return ",";
+  };
+
+  const parseCsvLine = (line: string, delimiter: string = ","): string[] => {
+    if (delimiter === "SPACES") {
+      return line
+        .trim()
+        .split(/\s{2,}/)
+        .map((c) => c.trim());
+    }
+
     const result: string[] = [];
     let current = "";
     let inQuotes = false;
@@ -474,7 +502,7 @@ const quillFormats = [
         } else {
           inQuotes = !inQuotes;
         }
-      } else if (char === "," && !inQuotes) {
+      } else if (char === delimiter && !inQuotes) {
         result.push(current.trim());
         current = "";
       } else {
@@ -488,21 +516,26 @@ const quillFormats = [
   const HEADER_MAP: Record<string, string> = {
     "reference no": "referenceNo",
     "reference_no": "referenceNo",
+    "referenceno": "referenceNo",
     "ref no": "referenceNo",
     "ref": "referenceNo",
     "serial no": "serialNo",
     "serial_no": "serialNo",
+    "serialno": "serialNo",
     "serial": "serialNo",
     "mark name": "markName",
     "mark_name": "markName",
+    "markname": "markName",
     "mark": "markName",
     "trademark": "markName",
     "filing date": "filingDate",
     "filing_date": "filingDate",
+    "filingdate": "filingDate",
     "date": "filingDate",
     "email": "email",
     "e-mail": "email",
     "email address": "email",
+    "emailaddress": "email",
     "to": "email",
     "cc": "cc",
     "bcc": "bcc",
@@ -511,11 +544,26 @@ const quillFormats = [
     "template id": "templateId",
     "template_id": "templateId",
     "template name": "templateName",
+    "templatename": "templateName",
     "attachment": "attachment",
+    "status": "status",
+    "sent at": "sentAt",
+    "opened at": "openedAt",
+    "open count": "openCount",
+    "tracking id": "trackingId",
+    "tracking_id": "trackingId",
+    "gmail used": "gmailUsed",
+    "gmail_used": "gmailUsed",
   };
 
   const normalizeHeader = (h: string) =>
-    h.replace(/^\uFEFF/, "").trim().toLowerCase().replace(/\s+/g, " ");
+    h
+      .replace(/^\uFEFF/, "")
+      .trim()
+      .toLowerCase()
+      .replace(/[_\-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
 
   const handleImportSheet = async () => {
     try {
@@ -524,27 +572,38 @@ const quillFormats = [
       setSuccessMsg("");
 
       const lines = spreadsheetText
-        .trim()
-        .split(/\r?\n/)
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0);
+        .replace(/^\uFEFF/, "")
+        .split(/\r\n|\n|\r/)
+        .map((l) => l.replace(/\u00a0/g, " ").trimEnd())
+        .filter((l) => l.trim().length > 0);
 
       if (lines.length < 2) {
-        showError("Invalid spreadsheet. Header + at least 1 data row required.");
+        showError(
+          "Invalid spreadsheet. Header + at least 1 data row required. Tip: Google Sheets se copy karte waqt header + data dono select karo. CSV download bhi use kar sakte ho."
+        );
         return;
       }
 
-      const rawHeaders = parseCsvLine(lines[0]);
-      const mappedKeys = rawHeaders.map((h) => HEADER_MAP[normalizeHeader(h)] || null);
+      const delimiter = detectDelimiter(lines[0]);
+      const rawHeaders = parseCsvLine(lines[0], delimiter);
+      const mappedKeys = rawHeaders.map(
+        (h) => HEADER_MAP[normalizeHeader(h)] || null
+      );
 
       if (!mappedKeys.includes("email")) {
-        showError("Email column not found. Headers: " + rawHeaders.join(", "));
+        showError(
+          "Email column not found. Headers detected: [" +
+            rawHeaders.join(" | ") +
+            "]. Delimiter: " +
+            (delimiter === "\t" ? "TAB (Google Sheets)" : delimiter) +
+            ". Header mein 'Email' column hona chahiye."
+        );
         return;
       }
 
       const items: any[] = [];
       for (let i = 1; i < lines.length; i++) {
-        const cols = parseCsvLine(lines[i]);
+        const cols = parseCsvLine(lines[i], delimiter);
         if (cols.every((c) => !c)) continue;
         const obj: any = {};
         mappedKeys.forEach((key, idx) => {
@@ -554,7 +613,9 @@ const quillFormats = [
       }
 
       if (items.length === 0) {
-        showError("No valid rows (Email required).");
+        showError(
+          "No valid rows with Email found. Delimiter/headers theek hain? Har data row mein Email column bhara hona chahiye."
+        );
         return;
       }
 
