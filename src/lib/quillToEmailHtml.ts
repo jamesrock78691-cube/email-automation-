@@ -134,67 +134,75 @@ export function quillToEmailHtml(html: string): string {
  * Tighten spacing for email clients.
  * Quill uses <p> per line; Gmail/Outlook add large default margins → huge gaps.
  */
+/**
+ * Preserve spacing exactly as user typed in Quill / pasted content.
+ * Do NOT strip empty paragraphs or intentional line breaks.
+ */
 function normalizeEmailSpacing(html: string): string {
   if (!html || !html.trim()) return html;
 
   let result = html;
 
-  // Remove empty paragraphs Quill inserts
-  result = result.replace(/<p([^>]*)>\s*<br\s*\/?>\s*<\/p>/gi, "");
-  result = result.replace(/<p([^>]*)>\s*&nbsp;\s*<\/p>/gi, "");
-  result = result.replace(/<p([^>]*)>\s*<\/p>/gi, "");
+  // Keep intentional blank lines as visible space (do not delete them)
+  // Convert empty <p><br></p> / <p>&nbsp;</p> into a small spacer paragraph
+  result = result.replace(
+    /<p([^>]*)>\s*(?:<br\s*\/?>|&nbsp;|\s)*\s*<\/p>/gi,
+    '<p$1 style="margin: 0 0 10px 0; padding: 0; line-height: 1.5;">&nbsp;</p>'
+  );
 
-  // Collapse multiple <br> into max two
-  result = result.replace(/(<br\s*\/?>\s*){3,}/gi, "<br/><br/>");
-
-  // Block tags: tight email-safe margins
+  // Soft, email-safe margins — still readable, not stuck, not huge gaps
   const blocks = ["p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li"];
   for (const tag of blocks) {
     const re = new RegExp(`<${tag}(\\s[^>]*)?>`, "gi");
     result = result.replace(re, (full, attrs = "") => {
       attrs = attrs || "";
+
       const margin =
         tag === "p" || tag === "div"
-          ? "margin: 0 0 6px 0; padding: 0; line-height: 1.45;"
+          ? "margin: 0 0 10px 0; padding: 0; line-height: 1.5;"
           : tag.startsWith("h")
-            ? "margin: 0 0 8px 0; padding: 0; line-height: 1.3;"
-            : "margin: 0 0 4px 0; padding: 0; line-height: 1.45;";
+            ? "margin: 0 0 12px 0; padding: 0; line-height: 1.35;"
+            : "margin: 0 0 6px 0; padding: 0; line-height: 1.5;";
 
       if (/\sstyle\s*=\s*"/i.test(attrs)) {
         return full.replace(/style\s*=\s*"([^"]*)"/i, (_m, styles) => {
           let s = styles.trim();
-          if (!/margin\s*:/i.test(s)) s = margin + " " + s;
-          else s = s.replace(/margin\s*:[^;]+;?/gi, "margin: 0 0 6px 0;");
+          // Only add margin/padding/line-height if missing — don't overwrite user's styles
+          if (!/margin\s*:/i.test(s)) s = margin.split(";")[0] + "; " + s;
           if (!/padding\s*:/i.test(s)) s = "padding: 0; " + s;
-          if (!/line-height\s*:/i.test(s)) s = "line-height: 1.45; " + s;
+          if (!/line-height\s*:/i.test(s)) s = "line-height: 1.5; " + s;
           return `style="${s}"`;
         });
       }
+
       if (/\sstyle\s*=\s*'/i.test(attrs)) {
         return full.replace(/style\s*=\s*'([^']*)'/i, (_m, styles) => {
           let s = styles.trim();
-          if (!/margin\s*:/i.test(s)) s = margin + " " + s;
+          if (!/margin\s*:/i.test(s)) s = margin.split(";")[0] + "; " + s;
           if (!/padding\s*:/i.test(s)) s = "padding: 0; " + s;
-          if (!/line-height\s*:/i.test(s)) s = "line-height: 1.45; " + s;
+          if (!/line-height\s*:/i.test(s)) s = "line-height: 1.5; " + s;
           return `style='${s}'`;
         });
       }
+
       return `<${tag}${attrs} style="${margin}">`;
     });
   }
 
+  // Lists — keep normal spacing
   result = result.replace(/<ul(\s[^>]*)?>/gi, (full, attrs = "") => {
     attrs = attrs || "";
     if (/style\s*=/i.test(attrs)) return full;
-    return `<ul${attrs} style="margin: 0 0 8px 0; padding-left: 20px;">`;
+    return `<ul${attrs} style="margin: 0 0 12px 0; padding-left: 22px;">`;
   });
   result = result.replace(/<ol(\s[^>]*)?>/gi, (full, attrs = "") => {
     attrs = attrs || "";
     if (/style\s*=/i.test(attrs)) return full;
-    return `<ol${attrs} style="margin: 0 0 8px 0; padding-left: 20px;">`;
+    return `<ol${attrs} style="margin: 0 0 12px 0; padding-left: 22px;">`;
   });
 
-  result = `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.45; color: #111111;">${result}</div>`;
+  // Wrapper — do not force extra tight line-height
+  result = `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.5; color: #111111;">${result}</div>`;
 
   return result;
 }
