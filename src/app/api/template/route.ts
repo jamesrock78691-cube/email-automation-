@@ -136,7 +136,7 @@ export async function GET(request: NextRequest) {
 
     let owners = await getOwners();
 
-   Super Admin: restore legacy (unowned) templates → claim them
+       // Super Admin: restore legacy (unowned) templates → claim them
     if (role === "super_admin") {
       let claimed = false;
       for (const t of list) {
