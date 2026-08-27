@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { templates, settings, users } from "@/db/schema";
 import { eq, desc } from "drizzle-orm";
 import { createHmac, timingSafeEqual } from "crypto";
+import { quillToEmailHtml } from "@/lib/quillToEmailHtml";
 
 const SECRET =
   process.env.AUTH_SECRET ||
@@ -135,7 +136,7 @@ export async function GET(request: NextRequest) {
 
     let owners = await getOwners();
 
-    // Super Admin: restore legacy (unowned) templates → claim them
+   Super Admin: restore legacy (unowned) templates → claim them
     if (role === "super_admin") {
       let claimed = false;
       for (const t of list) {
@@ -213,7 +214,7 @@ export async function POST(request: NextRequest) {
       .values({
         name,
         subject,
-        bodyHtml,
+        bodyHtml: quillToEmailHtml(String(bodyHtml || "")),
         bodyText: bodyText || "",
         attachmentsJson: attachmentsJson || "[]",
       })
@@ -282,7 +283,7 @@ export async function PUT(request: NextRequest) {
     const updates: any = {};
     if (name !== undefined) updates.name = name;
     if (subject !== undefined) updates.subject = subject;
-    if (bodyHtml !== undefined) updates.bodyHtml = bodyHtml;
+    if (bodyHtml !== undefined) updates.bodyHtml = quillToEmailHtml(String(bodyHtml || ""));
     if (bodyText !== undefined) updates.bodyText = bodyText;
     if (attachmentsJson !== undefined) updates.attachmentsJson = attachmentsJson;
 
