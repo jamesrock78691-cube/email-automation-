@@ -3429,6 +3429,99 @@ readOnly={gmailForm.provider !== "custom" && gmailForm.provider !== "cpanel"}
 ))}
 </div>
 
+                   {/* Spam risk checker */}
+                <div
+                  className={`rounded-xl border p-4 space-y-3 ${
+                    spamReport.level === "critical"
+                      ? "border-rose-500/50 bg-rose-950/30"
+                      : spamReport.level === "high"
+                        ? "border-orange-500/40 bg-orange-950/20"
+                        : spamReport.level === "medium"
+                          ? "border-amber-500/40 bg-amber-950/20"
+                          : "border-emerald-500/30 bg-emerald-950/20"
+                  }`}
+                >
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-2">
+                      <AlertTriangle
+                        className={`h-4 w-4 ${
+                          spamReport.level === "low"
+                            ? "text-emerald-400"
+                            : spamReport.level === "medium"
+                              ? "text-amber-400"
+                              : "text-rose-400"
+                        }`}
+                      />
+                      <span className="text-sm font-bold text-white">Spam Risk Checker</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] uppercase tracking-wider text-slate-400">Score</span>
+                      <span
+                        className={`text-sm font-mono font-bold px-2 py-0.5 rounded ${
+                          spamReport.level === "critical"
+                            ? "bg-rose-600 text-white"
+                            : spamReport.level === "high"
+                              ? "bg-orange-600 text-white"
+                              : spamReport.level === "medium"
+                                ? "bg-amber-600 text-white"
+                                : "bg-emerald-600 text-white"
+                        }`}
+                      >
+                        {spamReport.score}/100 · {spamReport.level.toUpperCase()}
+                      </span>
+                    </div>
+                  </div>
+                  <p className="text-xs text-slate-300">{spamReport.summary}</p>
+
+                  {spamReport.hits.length > 0 && (
+                    <div className="space-y-2">
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                        Trigger words / patterns
+                      </p>
+                      <div className="max-h-40 overflow-y-auto space-y-1.5">
+                        {spamReport.hits.map((hit, i) => (
+                          <div
+                            key={i}
+                            className="flex flex-wrap items-start gap-2 text-xs bg-slate-900/80 border border-slate-800 rounded-lg px-2.5 py-1.5"
+                          >
+                            <span
+                              className={`shrink-0 text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${
+                                hit.severity === "high"
+                                  ? "bg-rose-500/20 text-rose-300"
+                                  : hit.severity === "medium"
+                                    ? "bg-amber-500/20 text-amber-300"
+                                    : "bg-slate-500/20 text-slate-300"
+                              }`}
+                            >
+                              {hit.severity}
+                            </span>
+                            <span className="text-slate-400">{hit.category}</span>
+                            <span className="text-white font-mono">&quot;{hit.word}&quot;</span>
+                            <span className="text-slate-500">×{hit.count}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {spamReport.tips.length > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                        Spam avoid tips
+                      </p>
+                      <ul className="list-disc pl-4 text-xs text-slate-300 space-y-1">
+                        {spamReport.tips.map((tip, i) => (
+                          <li key={i}>{tip}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  <p className="text-[10px] text-slate-500">
+                    Heuristic checker only — still send a test to Gmail/Outlook. Avoid ALL CAPS subjects, Click here, fake urgency, and prize language.
+                  </p>
+                </div>             
+
                 <div className="flex justify-end gap-2 pt-2 border-t border-slate-900">
                   <button
                     type="button"
