@@ -1,63 +1,199 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { queue, gmailAccounts, templates, campaigns, trackingLogs } from "@/db/schema";
+import {
+  queue,
+  gmailAccounts,
+  templates,
+  campaigns,
+  trackingLogs,
+  settings,
+  users,
+} from "@/db/schema";
 import { seedDatabase } from "@/db/seed";
-import { count, eq, desc, sql } from "drizzle-orm";
+import { count, eq, desc, sql, inArray } from "drizzle-orm";
+import { createHmac, timingSafeEqual } from "crypto";
+
+const SECRET =
+  process.env.AUTH_SECRET ||
+  process.env.DATABASE_URL ||
+  "email-automation-v1-dev-secret-change-me";
+
+function verifyToken(token: string): {
+  userId: number;
+  username: string;
+  role: string;
+} | null {
+  try {
+    if (!token || !token.includes(".")) return null;
+    const [payloadB64, sig] = token.split(".");
+    const expected = createHmac("sha256", SECRET)
+      .update(payloadB64)
+      .digest("hex");
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+    const json = Buffer.from(
+      payloadB64.replace(/-/g, "+").replace(/_/g, "/"),
+      "base64"
+    ).toString("utf8");
+    const payload = JSON.parse(json);
+    if (!payload?.userId || Date.now() > payload.exp) return null;
+    return {
+      userId: payload.userId,
+      username: payload.username || "",
+      role: payload.role || "operator",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getSession(req: NextRequest) {
+  const auth = req.headers.get("authorization");
+  const token = auth?.startsWith("Bearer ")
+    ? auth.slice(7).trim()
+    : req.cookies.get("ea_session")?.value;
+  if (!token) return null;
+  return verifyToken(token);
+}
+
+function normalizeRole(role: string, username?: string) {
+  const r = (role || "").toLowerCase().trim();
+  if (
+    r === "super_admin" ||
+    username === "admin" ||
+    username === "superadmin"
+  ) {
+    return "super_admin";
+  }
+  if (r === "admin") return "admin";
+  return "operator";
+}
+
+async function getSmtpAssignments(): Promise<Record<string, number[]>> {
+  try {
+    const rows = await db
+      .select()
+      .from(settings)
+      .where(eq(settings.key, "smtp_assignments"))
+      .limit(1);
+    if (!rows.length) return {};
+    const map = JSON.parse(rows[0].value || "{}");
+    return map && typeof map === "object" ? map : {};
+  } catch {
+    return {};
+  }
+}
 
 export async function GET(request: NextRequest) {
   try {
-    // Run auto seeder if tables are empty
     await seedDatabase();
 
-    // Fetch counts
+    const session = getSession(request);
+
     const totalEmailsResult = await db.select({ value: count() }).from(queue);
     const totalCount = totalEmailsResult[0]?.value || 0;
 
-    const sentEmailsResult = await db.select({ value: count() }).from(queue).where(eq(queue.status, "sent"));
+    const sentEmailsResult = await db
+      .select({ value: count() })
+      .from(queue)
+      .where(eq(queue.status, "sent"));
     const sentCount = sentEmailsResult[0]?.value || 0;
 
-    const pendingEmailsResult = await db.select({ value: count() }).from(queue).where(eq(queue.status, "pending"));
+    const pendingEmailsResult = await db
+      .select({ value: count() })
+      .from(queue)
+      .where(eq(queue.status, "pending"));
     const pendingCount = pendingEmailsResult[0]?.value || 0;
 
-    const sendingEmailsResult = await db.select({ value: count() }).from(queue).where(eq(queue.status, "sending"));
+    const sendingEmailsResult = await db
+      .select({ value: count() })
+      .from(queue)
+      .where(eq(queue.status, "sending"));
     const sendingCount = sendingEmailsResult[0]?.value || 0;
 
-    const failedEmailsResult = await db.select({ value: count() }).from(queue).where(eq(queue.status, "failed"));
+    const failedEmailsResult = await db
+      .select({ value: count() })
+      .from(queue)
+      .where(eq(queue.status, "failed"));
     const failedCount = failedEmailsResult[0]?.value || 0;
 
-    // Opened count (emails where openCount > 0)
-    const openedResult = await db.select({ value: count() }).from(queue).where(sql`${queue.openCount} > 0`);
+    const openedResult = await db
+      .select({ value: count() })
+      .from(queue)
+      .where(sql`${queue.openCount} > 0`);
     const openedCount = openedResult[0]?.value || 0;
 
-    // Gmail rotators count
-    const activeGmailResult = await db.select({ value: count() }).from(gmailAccounts).where(eq(gmailAccounts.status, "enabled"));
+    const activeGmailResult = await db
+      .select({ value: count() })
+      .from(gmailAccounts)
+      .where(eq(gmailAccounts.status, "enabled"));
     const activeGmailCount = activeGmailResult[0]?.value || 0;
 
-    const totalGmailResult = await db.select({ value: count() }).from(gmailAccounts);
+    const totalGmailResult = await db
+      .select({ value: count() })
+      .from(gmailAccounts);
     const totalGmailCount = totalGmailResult[0]?.value || 0;
 
-    // Fetch templates count
-    const templatesResult = await db.select({ value: count() }).from(templates);
+    const templatesResult = await db
+      .select({ value: count() })
+      .from(templates);
     const templatesCount = templatesResult[0]?.value || 0;
 
-    // Fetch campaigns count
-    const campaignsResult = await db.select({ value: count() }).from(campaigns);
+    const campaignsResult = await db
+      .select({ value: count() })
+      .from(campaigns);
     const campaignsCount = campaignsResult[0]?.value || 0;
 
-    // Calculate open rate
-    const openRate = sentCount > 0 ? Math.round((openedCount / sentCount) * 100) : 0;
+    const openRate =
+      sentCount > 0 ? Math.round((openedCount / sentCount) * 100) : 0;
 
-    // Fetch recent activity queue logs
     const recentQueueLogs = await db
       .select()
       .from(queue)
       .orderBy(desc(queue.createdAt))
       .limit(12);
 
-    // Fetch list of accounts
-    const accountsList = await db.select().from(gmailAccounts).orderBy(gmailAccounts.id);
+    // Accounts — operator ko sirf assigned
+    let accountsList: any[] = [];
+    const role = session
+      ? normalizeRole(session.role, session.username)
+      : "operator";
 
-    // Fetch recent tracker opens
+    if (session && role === "operator") {
+      const assignments = await getSmtpAssignments();
+      const allowedIds: number[] = (
+        assignments[String(session.userId)] ||
+        assignments[session.username] ||
+        []
+      )
+        .map((id: any) => Number(id))
+        .filter((id: number) => !isNaN(id) && id > 0);
+
+      if (allowedIds.length > 0) {
+        accountsList = await db
+          .select()
+          .from(gmailAccounts)
+          .where(inArray(gmailAccounts.id, allowedIds))
+          .orderBy(gmailAccounts.id);
+      } else {
+        accountsList = [];
+      }
+    } else {
+      accountsList = await db
+        .select()
+        .from(gmailAccounts)
+        .orderBy(gmailAccounts.id);
+    }
+
+    // appPassword operator se hide
+    if (role === "operator") {
+      accountsList = accountsList.map((a) => {
+        const { appPassword, ...rest } = a;
+        return rest;
+      });
+    }
+
     const recentOpens = await db
       .select({
         id: trackingLogs.id,
@@ -85,7 +221,7 @@ export async function GET(request: NextRequest) {
         sending: sendingCount,
         failed: failedCount,
         opened: openedCount,
-        openRate: `${openRate}%`,
+        openRate,
         activeGmailCount,
         totalGmailCount,
         templatesCount,
@@ -93,12 +229,12 @@ export async function GET(request: NextRequest) {
       },
       accounts: accountsList,
       recentQueue: recentQueueLogs,
-      recentOpens: recentOpens,
+      recentOpens,
     });
   } catch (error: any) {
-    console.error("Dashboard calculation error:", error);
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return NextResponse.json(
+      { success: false, error: error.message },
+      { status: 500 }
+    );
   }
 }
-
-// Simple raw sql helper fallback
