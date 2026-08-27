@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import dynamic from "next/dynamic";
 import {
   Mail,
@@ -25,6 +25,8 @@ import {
   HelpCircle,
   Users
 } from "lucide-react";
+
+import { analyzeSpamRisk } from "@/lib/spamChecker";
 
 const RichTextComposer = dynamic(() => import("../components/RichTextComposer"), { ssr: false });
 
@@ -144,7 +146,11 @@ const [showPreview, setShowPreview] = useState(false);
     bodyText: "",
     attachmentsJson: "[]",
   });
-
+  const spamReport = useMemo(
+    () => analyzeSpamRisk(templateForm.subject || "", templateForm.bodyHtml || ""),
+    [templateForm.subject, templateForm.bodyHtml]
+  );
+  
 const [uploadingAttachment, setUploadingAttachment] = useState(false);
 
 const [previewOpen, setPreviewOpen] = useState(false);
