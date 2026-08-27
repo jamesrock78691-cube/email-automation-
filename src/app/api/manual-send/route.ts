@@ -1,68 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
+import { quillToEmailHtml } from "@/lib/quillToEmailHtml";
 import nodemailer from "nodemailer";
 import { db } from "@/db";
-import { gmailAccounts, settings, users } from "@/db/schema";
-import { eq, and, desc, inArray } from "drizzle-orm";
+import { gmailAccounts, settings } from "@/db/schema";
+import { eq, and, desc } from "drizzle-orm";
 import { appendManualSentLog } from "@/app/services/googleSheets";
-import { randomUUID, createHmac, timingSafeEqual } from "crypto";
-import { quillToEmailHtml } from "@/lib/quillToEmailHtml";
-
-const SECRET =
-  process.env.AUTH_SECRET ||
-  process.env.DATABASE_URL ||
-  "email-automation-v1-dev-secret-change-me";
-
-function verifyToken(token: string): {
-  userId: number;
-  username: string;
-  role: string;
-} | null {
-  try {
-    if (!token || !token.includes(".")) return null;
-    const [payloadB64, sig] = token.split(".");
-    const expected = createHmac("sha256", SECRET)
-      .update(payloadB64)
-      .digest("hex");
-    const a = Buffer.from(sig);
-    const b = Buffer.from(expected);
-    if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
-    const json = Buffer.from(
-      payloadB64.replace(/-/g, "+").replace(/_/g, "/"),
-      "base64"
-    ).toString("utf8");
-    const payload = JSON.parse(json);
-    if (!payload?.userId || Date.now() > payload.exp) return null;
-    return {
-      userId: payload.userId,
-      username: payload.username || "",
-      role: payload.role || "operator",
-    };
-  } catch {
-    return null;
-  }
-}
-
-function getSession(req: NextRequest) {
-  const auth = req.headers.get("authorization");
-  const token = auth?.startsWith("Bearer ")
-    ? auth.slice(7).trim()
-    : req.cookies.get("ea_session")?.value;
-  if (!token) return null;
-  return verifyToken(token);
-}
-
-function normalizeRole(role: string, username?: string) {
-  const r = (role || "").toLowerCase().trim();
-  if (
-    r === "super_admin" ||
-    username === "admin" ||
-    username === "superadmin"
-  ) {
-    return "super_admin";
-  }
-  if (r === "admin") return "admin";
-  return "operator";
-}
+import { randomUUID } from "crypto";
 
 async function getSmtpAssignments(): Promise<Record<string, number[]>> {
   try {
@@ -71,24 +14,29 @@ async function getSmtpAssignments(): Promise<Record<string, number[]>> {
       .from(settings)
       .where(eq(settings.key, "smtp_assignments"))
       .limit(1);
-    if (!rows.length) return {};
-    const map = JSON.parse(rows[0].value || "{}");
-    return map && typeof map === "object" ? map : {};
+    if (!rows.length || !rows[0].value) return {};
+    const parsed = JSON.parse(rows[0].value);
+    return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
     return {};
   }
 }
 
+function accountAllowedForUser(
+  accountId: number,
+  userId: number | null | undefined,
+  isSuper: boolean,
+  map: Record<string, number[]>
+): boolean {
+  if (isSuper) return true;
+  const assigned = map[String(accountId)] || [];
+  if (assigned.length === 0) return true;
+  if (userId == null) return false;
+  return assigned.map(Number).includes(Number(userId));
+}
+
 export async function POST(request: NextRequest) {
   try {
-    const session = getSession(request);
-    if (!session) {
-      return NextResponse.json(
-        { success: false, error: "Login required" },
-        { status: 401 }
-      );
-    }
-
     const body = await request.json();
 
     const {
@@ -120,22 +68,54 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const role = normalizeRole(session.role, session.username);
-    const now = new Date();
     let account: any = null;
+    const now = new Date();
+    const assignMap = await getSmtpAssignments();
+    const uid =
+      sentByUserId != null && sentByUserId !== ""
+        ? Number(sentByUserId)
+        : null;
+    const userIdNum = uid != null && !Number.isNaN(uid) ? uid : null;
+    const isSuper =
+      String(body.isSuperAdmin || "") === "true" ||
+      String(body.role || "").toLowerCase() === "super_admin";
 
-    // Operator → only assigned SMTPs
-    if (role === "operator") {
-      const assignments = await getSmtpAssignments();
-      const allowedIds: number[] = (
-        assignments[String(session.userId)] ||
-        assignments[session.username] ||
-        []
-      )
-        .map((id: any) => Number(id))
-        .filter((id: number) => !isNaN(id) && id > 0);
+    if (smtpAccountId) {
+      const rows = await db
+        .select()
+        .from(gmailAccounts)
+        .where(
+          and(
+            eq(gmailAccounts.id, Number(smtpAccountId)),
+            eq(gmailAccounts.status, "enabled")
+          )
+        )
+        .limit(1);
+      account = rows[0] || null;
+      if (
+        account &&
+        !accountAllowedForUser(account.id, userIdNum, isSuper, assignMap)
+      ) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: "No SMTP accounts assigned to you. Contact Super Admin.",
+          },
+          { status: 403 }
+        );
+      }
+    } else {
+      const rows = await db
+        .select()
+        .from(gmailAccounts)
+        .where(eq(gmailAccounts.status, "enabled"))
+        .orderBy(desc(gmailAccounts.priority));
 
-      if (allowedIds.length === 0) {
+      const allowed = rows.filter((a) =>
+        accountAllowedForUser(a.id, userIdNum, isSuper, assignMap)
+      );
+
+      if (allowed.length === 0 && rows.length > 0) {
         return NextResponse.json(
           {
             success: false,
@@ -145,92 +125,23 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      if (smtpAccountId) {
-        const wanted = Number(smtpAccountId);
-        if (!allowedIds.includes(wanted)) {
-          return NextResponse.json(
-            {
-              success: false,
-              error: "This SMTP is not assigned to you.",
-            },
-            { status: 403 }
-          );
-        }
-        const rows = await db
-          .select()
-          .from(gmailAccounts)
-          .where(
-            and(
-              eq(gmailAccounts.id, wanted),
-              eq(gmailAccounts.status, "enabled")
-            )
-          )
-          .limit(1);
-        account = rows[0] || null;
-      } else {
-        const rows = await db
-          .select()
-          .from(gmailAccounts)
-          .where(
-            and(
-              inArray(gmailAccounts.id, allowedIds),
-              eq(gmailAccounts.status, "enabled")
-            )
-          )
-          .orderBy(desc(gmailAccounts.priority));
+      account =
+        allowed.find(
+          (a) =>
+            (!a.cooldownUntil || a.cooldownUntil <= now) &&
+            (a.sentToday || 0) < (a.dailyLimit || 500)
+        ) || null;
+    }
 
-        account =
-          rows.find(
-            (a) =>
-              (!a.cooldownUntil || a.cooldownUntil <= now) &&
-              (a.sentToday || 0) < (a.dailyLimit || 500)
-          ) || null;
-      }
-
-      if (!account) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: "No available assigned SMTP account right now.",
-          },
-          { status: 400 }
-        );
-      }
-    } else {
-      // Admin / Super Admin → any enabled
-      if (smtpAccountId) {
-        const rows = await db
-          .select()
-          .from(gmailAccounts)
-          .where(
-            and(
-              eq(gmailAccounts.id, Number(smtpAccountId)),
-              eq(gmailAccounts.status, "enabled")
-            )
-          )
-          .limit(1);
-        account = rows[0] || null;
-      } else {
-        const rows = await db
-          .select()
-          .from(gmailAccounts)
-          .where(eq(gmailAccounts.status, "enabled"))
-          .orderBy(desc(gmailAccounts.priority));
-
-        account =
-          rows.find(
-            (a) =>
-              (!a.cooldownUntil || a.cooldownUntil <= now) &&
-              (a.sentToday || 0) < (a.dailyLimit || 500)
-          ) || null;
-      }
-
-      if (!account) {
-        return NextResponse.json(
-          { success: false, error: "No available SMTP account" },
-          { status: 400 }
-        );
-      }
+    if (!account) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "No available SMTP account (all disabled, cooldown, or daily limit reached).",
+        },
+        { status: 400 }
+      );
     }
 
     const transporter = nodemailer.createTransport({
@@ -246,8 +157,7 @@ export async function POST(request: NextRequest) {
 
     await transporter.verify();
 
-    const displayFrom =
-      fromEmail || (account as any).fromEmail || account.email;
+    const displayFrom = fromEmail || (account as any).fromEmail || account.email;
     const displayName = fromName || account.senderName || account.email;
     const trackingId = randomUUID();
 
@@ -290,8 +200,8 @@ export async function POST(request: NextRequest) {
         status: "Sent",
         sentAt: new Date().toISOString(),
         gmailUsed: account.email,
-        sentBy: sentByUsername || session.username || "",
-        sentById: sentByUserId || String(session.userId) || "",
+        sentBy: sentByUsername || "",
+        sentById: sentByUserId || "",
         trackingId,
       });
     } catch (logErr) {
