@@ -7,6 +7,10 @@ export function quillToEmailHtml(html: string): string {
   if (!html || !html.trim()) return html;
 
   let result = html;
+    // Agar pehle se convert ho chuka hai to double-wrap mat karo
+  if (result.includes('data-ea-converted="1"')) {
+    return result;
+  }
 
   const applyAlign = (align: string) => {
     const reOnly = new RegExp(
@@ -202,7 +206,7 @@ function normalizeEmailSpacing(html: string): string {
   });
 
   // Wrapper — do not force extra tight line-height
-  result = `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.5; color: #111111;">${result}</div>`;
+    result = `<div data-ea-converted="1" style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.5; color: #111111;">${result}</div>`;
 
   return result;
 }
