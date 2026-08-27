@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 
 import { analyzeSpamRisk } from "@/lib/spamChecker";
+import { quillToEmailHtml } from "@/lib/quillToEmailHtml";
 
 const RichTextComposer = dynamic(() => import("../components/RichTextComposer"), { ssr: false });
 
@@ -850,7 +851,7 @@ const [manualSending, setManualSending] = useState(false);
     setSuccessMsg("");
 
     // Always send as HTML (rich text / source mode both produce HTML)
-    const finalHtml = manualEmailForm.html || "";
+   const finalHtml = quillToEmailHtml(manualEmailForm.html || "");
 
     const res = await fetch("/api/manual-send", {
       method: "POST",
@@ -858,7 +859,10 @@ const [manualSending, setManualSending] = useState(false);
       body: JSON.stringify({
         ...manualEmailForm,
         html: finalHtml,
-        sentByUserId: authUser?.username,
+        sentByUserId: authUser?.id,
+sentByUsername: authUser?.username || "",
+role: authUser?.role || "",
+isSuperAdmin: typeof isSuperAdmin === "function" ? isSuperAdmin() : false,
         referenceNo: composeVariables?.reference_no || "",
 serialNo: composeVariables?.serial_no || "",
 markName: composeVariables?.mark_name || "",
@@ -2533,7 +2537,7 @@ const handleAttachmentUpload = async (
               if (isSuperAdmin()) return true;
               const assigned = smtpAssignments[String(acc.id)] || [];
               // if no assignments configured for this SMTP, only super can use; if assigned, check user
-              if (assigned.length === 0) return false;
+              if (assigned.length === 0) return true;
               return assigned.includes(authUser?.id);
             })
             .map((acc: any) => (
