@@ -5,6 +5,8 @@ import { gmailAccounts } from "@/db/schema";
 import { eq, and, desc } from "drizzle-orm";
 import { appendManualSentLog } from "@/app/services/googleSheets";
 import { randomUUID } from "crypto";
+import { quillToEmailHtml } from "@/lib/quillToEmailHtml";
+
 
 export async function POST(request: NextRequest) {
   try {
@@ -30,6 +32,7 @@ export async function POST(request: NextRequest) {
       sentByUserId,
       sentByUsername,
     } = body;
+    const emailHtml = quillToEmailHtml(String(html || ""));
 
     if (!to || !subject || !html) {
       return NextResponse.json(
@@ -99,7 +102,7 @@ export async function POST(request: NextRequest) {
       cc: cc || undefined,
       bcc: bcc || undefined,
       subject,
-      html,
+      html: emailHtml,
       text: text || undefined,
     });
 
