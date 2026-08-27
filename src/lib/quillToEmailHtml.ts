@@ -1,6 +1,5 @@
 /**
- * Convert Quill classes → inline styles for Gmail/Outlook.
- * Preserve exact spacing as typed in editor (no chipakna).
+ * Quill → email HTML. Spacing exact jaisa editor mein likha / save kiya.
  */
 
 export function quillToEmailHtml(html: string): string {
@@ -8,7 +7,6 @@ export function quillToEmailHtml(html: string): string {
 
   let result = html;
 
-  // Already converted → skip
   if (result.includes('data-ea-converted="1"')) {
     return result;
   }
@@ -125,40 +123,38 @@ function normalizeEmailSpacing(html: string): string {
 
   let result = html;
 
-  // Blank line (Enter Enter) → visible spacer — DELETE mat karo
+  // Empty line = sirf ek normal line break, extra gap nahi
   result = result.replace(
     /<p([^>]*)>\s*(?:<br\s*\/?>|&nbsp;|\s)*\s*<\/p>/gi,
-    '<p$1 style="margin:0 0 14px 0;padding:0;line-height:1.6;font-size:14px;">&nbsp;</p>'
+    '<p$1 style="margin:0;padding:0;line-height:1.5;"><br></p>'
   );
 
-  // Har paragraph / block pe clear gap
+  // Normal paragraphs — zero extra margin (jaisa type kiya)
   const blocks = ["p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li"];
   for (const tag of blocks) {
     const re = new RegExp(`<${tag}(\\s[^>]*)?>`, "gi");
     result = result.replace(re, (full, attrs = "") => {
       attrs = attrs || "";
       const base =
-        tag === "p" || tag === "div"
-          ? "margin:0 0 14px 0;padding:0;line-height:1.6;"
-          : tag.startsWith("h")
-            ? "margin:0 0 16px 0;padding:0;line-height:1.4;"
-            : "margin:0 0 8px 0;padding:0;line-height:1.6;";
+        tag.startsWith("h")
+          ? "margin:0;padding:0;line-height:1.4;"
+          : "margin:0;padding:0;line-height:1.5;";
 
       if (/\sstyle\s*=\s*"/i.test(attrs)) {
         return full.replace(/style\s*=\s*"([^"]*)"/i, (_m, styles) => {
           let s = styles.trim();
-          if (!/margin\s*:/i.test(s)) s = "margin:0 0 14px 0; " + s;
+          if (!/margin\s*:/i.test(s)) s = "margin:0; " + s;
           if (!/padding\s*:/i.test(s)) s = "padding:0; " + s;
-          if (!/line-height\s*:/i.test(s)) s = "line-height:1.6; " + s;
+          if (!/line-height\s*:/i.test(s)) s = "line-height:1.5; " + s;
           return `style="${s}"`;
         });
       }
       if (/\sstyle\s*=\s*'/i.test(attrs)) {
         return full.replace(/style\s*=\s*'([^']*)'/i, (_m, styles) => {
           let s = styles.trim();
-          if (!/margin\s*:/i.test(s)) s = "margin:0 0 14px 0; " + s;
+          if (!/margin\s*:/i.test(s)) s = "margin:0; " + s;
           if (!/padding\s*:/i.test(s)) s = "padding:0; " + s;
-          if (!/line-height\s*:/i.test(s)) s = "line-height:1.6; " + s;
+          if (!/line-height\s*:/i.test(s)) s = "line-height:1.5; " + s;
           return `style='${s}'`;
         });
       }
@@ -169,16 +165,15 @@ function normalizeEmailSpacing(html: string): string {
   result = result.replace(/<ul(\s[^>]*)?>/gi, (full, attrs = "") => {
     attrs = attrs || "";
     if (/style\s*=/i.test(attrs)) return full;
-    return `<ul${attrs} style="margin:0 0 14px 0;padding-left:22px;line-height:1.6;">`;
+    return `<ul${attrs} style="margin:0;padding-left:20px;line-height:1.5;">`;
   });
   result = result.replace(/<ol(\s[^>]*)?>/gi, (full, attrs = "") => {
     attrs = attrs || "";
     if (/style\s*=/i.test(attrs)) return full;
-    return `<ol${attrs} style="margin:0 0 14px 0;padding-left:22px;line-height:1.6;">`;
+    return `<ol${attrs} style="margin:0;padding-left:20px;line-height:1.5;">`;
   });
 
-  // <br> keep — collapse mat karo
-  result = `<div data-ea-converted="1" style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#111111;">${result}</div>`;
+  result = `<div data-ea-converted="1" style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5;color:#111111;">${result}</div>`;
 
   return result;
 }
