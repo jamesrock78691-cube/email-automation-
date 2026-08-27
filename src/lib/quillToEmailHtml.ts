@@ -1,5 +1,5 @@
 /**
- * Quill classes → inline styles + tight email line spacing
+ * Quill → email-safe HTML: inline align + ZERO extra line gaps (Gmail/Outlook)
  */
 export function quillToEmailHtml(html: string): string {
   if (!html || !html.trim()) return html;
@@ -7,31 +7,25 @@ export function quillToEmailHtml(html: string): string {
   let result = html;
 
   const applyAlign = (align: string) => {
-    const reOnly = new RegExp(
+    const re = new RegExp(
       `<([a-zA-Z0-9]+)([^>]*?)\\sclass="([^"]*?)\\bql-align-${align}\\b([^"]*?)"([^>]*?)>`,
       "gi"
     );
-    result = result.replace(reOnly, (_m, tag, before, c1, c2, after) => {
+    result = result.replace(re, (_m, tag, before, c1, c2, after) => {
       const restClass = `${c1}${c2}`.replace(/\s+/g, " ").trim();
       const attrs = `${before}${after}`;
       if (/\sstyle="/i.test(attrs) || /\sstyle='/i.test(attrs)) {
         let out = `<${tag}${before} class="${restClass}"${after}>`;
         out = out.replace(/style="([^"]*)"/i, (_sm: string, styles: string) => {
           if (/text-align\s*:/i.test(styles)) return `style="${styles}"`;
-          return `style="text-align: ${align}; ${styles}"`;
+          return `style="text-align:${align};${styles}"`;
         });
-        out = out.replace(/style='([^']*)'/i, (_sm: string, styles: string) => {
-          if (/text-align\s*:/i.test(styles)) return `style='${styles}'`;
-          return `style='text-align: ${align}; ${styles}'`;
-        });
-        out = out.replace(/\sclass=""/, "").replace(/\sclass=''/, "");
-        return out;
+        return out.replace(/\sclass=""/, "");
       }
-      const clsAttr = restClass ? ` class="${restClass}"` : "";
-      return `<${tag}${before}${clsAttr} style="text-align: ${align};"${after}>`;
+      const cls = restClass ? ` class="${restClass}"` : "";
+      return `<${tag}${before}${cls} style="text-align:${align};"${after}>`;
     });
   };
-
   applyAlign("center");
   applyAlign("right");
   applyAlign("justify");
@@ -40,75 +34,55 @@ export function quillToEmailHtml(html: string): string {
   result = result.replace(
     /<([a-zA-Z0-9]+)([^>]*?)\sclass="([^"]*?)\bql-size-([0-9.]+px)\b([^"]*?)"([^>]*?)>/gi,
     (_m, tag, before, c1, size, c2, after) => {
-      const restClass = `${c1}${c2}`.replace(/\s+/g, " ").trim();
+      const rest = `${c1}${c2}`.replace(/\s+/g, " ").trim();
+      const cls = rest ? ` class="${rest}"` : "";
       const attrs = `${before}${after}`;
       if (/\sstyle="/i.test(attrs)) {
-        let out = `<${tag}${before} class="${restClass}"${after}>`;
-        out = out.replace(/style="([^"]*)"/i, (_sm: string, styles: string) => {
-          if (/font-size\s*:/i.test(styles)) return `style="${styles}"`;
-          return `style="font-size: ${size}; ${styles}"`;
-        });
-        return out.replace(/\sclass=""/, "");
+        return `<${tag}${before}${cls}${after}>`.replace(
+          /style="([^"]*)"/i,
+          (_s, st) =>
+            /font-size\s*:/i.test(st) ? `style="${st}"` : `style="font-size:${size};${st}"`
+        );
       }
-      const clsAttr = restClass ? ` class="${restClass}"` : "";
-      return `<${tag}${before}${clsAttr} style="font-size: ${size};"${after}>`;
+      return `<${tag}${before}${cls} style="font-size:${size};"${after}>`;
     }
   );
 
   const fonts: Record<string, string> = {
-    arial: "Arial, Helvetica, sans-serif",
-    helvetica: "Helvetica, Arial, sans-serif",
-    "times-new-roman": "'Times New Roman', Times, serif",
-    georgia: "Georgia, serif",
-    verdana: "Verdana, Geneva, sans-serif",
-    "courier-new": "'Courier New', Courier, monospace",
-    tahoma: "Tahoma, Geneva, sans-serif",
-    "trebuchet-ms": "'Trebuchet MS', sans-serif",
-    garamond: "Garamond, serif",
-    "comic-sans-ms": "'Comic Sans MS', cursive",
+    arial: "Arial,Helvetica,sans-serif",
+    helvetica: "Helvetica,Arial,sans-serif",
+    "times-new-roman": "'Times New Roman',Times,serif",
+    georgia: "Georgia,serif",
+    verdana: "Verdana,Geneva,sans-serif",
+    "courier-new": "'Courier New',Courier,monospace",
+    tahoma: "Tahoma,Geneva,sans-serif",
+    "trebuchet-ms": "'Trebuchet MS',sans-serif",
+    garamond: "Garamond,serif",
+    "comic-sans-ms": "'Comic Sans MS',cursive",
   };
-
   for (const [key, family] of Object.entries(fonts)) {
     const re = new RegExp(
       `<([a-zA-Z0-9]+)([^>]*?)\\sclass="([^"]*?)\\bql-font-${key}\\b([^"]*?)"([^>]*?)>`,
       "gi"
     );
     result = result.replace(re, (_m, tag, before, c1, c2, after) => {
-      const restClass = `${c1}${c2}`.replace(/\s+/g, " ").trim();
+      const rest = `${c1}${c2}`.replace(/\s+/g, " ").trim();
+      const cls = rest ? ` class="${rest}"` : "";
       const attrs = `${before}${after}`;
       if (/\sstyle="/i.test(attrs)) {
-        let out = `<${tag}${before} class="${restClass}"${after}>`;
-        out = out.replace(/style="([^"]*)"/i, (_sm: string, styles: string) => {
-          if (/font-family\s*:/i.test(styles)) return `style="${styles}"`;
-          return `style="font-family: ${family}; ${styles}"`;
-        });
-        return out.replace(/\sclass=""/, "");
+        return `<${tag}${before}${cls}${after}>`.replace(
+          /style="([^"]*)"/i,
+          (_s, st) =>
+            /font-family\s*:/i.test(st)
+              ? `style="${st}"`
+              : `style="font-family:${family};${st}"`
+        );
       }
-      const clsAttr = restClass ? ` class="${restClass}"` : "";
-      return `<${tag}${before}${clsAttr} style="font-family: ${family};"${after}>`;
+      return `<${tag}${before}${cls} style="font-family:${family};"${after}>`;
     });
   }
 
-  result = result.replace(
-    /<([a-zA-Z0-9]+)([^>]*?)\sclass="([^"]*?)\bql-indent-(\d+)\b([^"]*?)"([^>]*?)>/gi,
-    (_m, tag, before, c1, n, c2, after) => {
-      const restClass = `${c1}${c2}`.replace(/\s+/g, " ").trim();
-      const marginLeft = `${parseInt(n, 10) * 3}em`;
-      const attrs = `${before}${after}`;
-      if (/\sstyle="/i.test(attrs)) {
-        let out = `<${tag}${before} class="${restClass}"${after}>`;
-        out = out.replace(/style="([^"]*)"/i, (_sm: string, styles: string) => {
-          if (/margin-left\s*:/i.test(styles)) return `style="${styles}"`;
-          return `style="margin-left: ${marginLeft}; ${styles}"`;
-        });
-        return out.replace(/\sclass=""/, "");
-      }
-      const clsAttr = restClass ? ` class="${restClass}"` : "";
-      return `<${tag}${before}${clsAttr} style="margin-left: ${marginLeft};"${after}>`;
-    }
-  );
-
-  result = result.replace(/\sclass=""/g, "").replace(/\sclass=''/g, "");
+  result = result.replace(/\sclass=""/g, "");
   return normalizeEmailSpacing(result);
 }
 
@@ -116,55 +90,44 @@ function normalizeEmailSpacing(html: string): string {
   if (!html || !html.trim()) return html;
   let result = html;
 
-  result = result.replace(/<p([^>]*)>\s*<br\s*\/?>\s*<\/p>/gi, "");
-  result = result.replace(/<p([^>]*)>\s*&nbsp;\s*<\/p>/gi, "");
-  result = result.replace(/<p([^>]*)>\s*<\/p>/gi, "");
-  result = result.replace(/(<br\s*\/?>\s*){3,}/gi, "<br/><br/>");
+  result = result.replace(
+    /^<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:[^"]*color:#111;">([\s\S]*)<\/div>$/i,
+    "$1"
+  );
 
-  const blocks = ["p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li"];
-  for (const tag of blocks) {
-    const re = new RegExp(`<${tag}(\\s[^>]*)?>`, "gi");
-    result = result.replace(re, (full, attrs = "") => {
+  result = result.replace(/<p[^>]*>\s*(<br\s*\/?>|&nbsp;|\s)*\s*<\/p>/gi, "");
+  result = result.replace(/<div[^>]*>\s*(<br\s*\/?>|&nbsp;|\s)*\s*<\/div>/gi, "");
+  result = result.replace(/(<br\s*\/?>\s*){3,}/gi, "<br/>");
+
+  // p → div (Gmail gap fix)
+  result = result.replace(/<p(\s[^>]*)?>/gi, "<div$1>");
+  result = result.replace(/<\/p>/gi, "</div>");
+
+  result = result.replace(
+    /<(div|h1|h2|h3|h4|h5|h6|li|td|th)(\s[^>]*)?>/gi,
+    (_m, tag, attrs = "") => {
       attrs = attrs || "";
-      const margin =
-        tag === "p" || tag === "div"
-          ? "margin:0 0 4px 0;padding:0;line-height:1.35;"
-          : tag.startsWith("h")
-            ? "margin:0 0 6px 0;padding:0;line-height:1.25;"
-            : "margin:0 0 2px 0;padding:0;line-height:1.35;";
-
+      const base = "margin:0;padding:0;line-height:1.4;font-size:inherit;";
       if (/\sstyle\s*=\s*"/i.test(attrs)) {
-        return full.replace(/style\s*=\s*"([^"]*)"/i, (_m, styles) => {
-          let s = styles.trim();
-          s = s.replace(/margin\s*:[^;]+;?/gi, "");
-          s = s.replace(/padding\s*:[^;]+;?/gi, "");
-          s = s.replace(/line-height\s*:[^;]+;?/gi, "");
-          return `style="${margin} ${s}"`;
+        return `<${tag}${attrs}>`.replace(/style\s*=\s*"([^"]*)"/i, (_s, st) => {
+          let s = st
+            .replace(/margin\s*:[^;]*;?/gi, "")
+            .replace(/padding\s*:[^;]*;?/gi, "")
+            .replace(/line-height\s*:[^;]*;?/gi, "")
+            .trim();
+          return `style="${base}${s}"`;
         });
       }
-      if (/\sstyle\s*=\s*'/i.test(attrs)) {
-        return full.replace(/style\s*=\s*'([^']*)'/i, (_m, styles) => {
-          let s = styles.trim();
-          s = s.replace(/margin\s*:[^;]+;?/gi, "");
-          s = s.replace(/padding\s*:[^;]+;?/gi, "");
-          s = s.replace(/line-height\s*:[^;]+;?/gi, "");
-          return `style='${margin} ${s}'`;
-        });
-      }
-      return `<${tag}${attrs} style="${margin}">`;
-    });
-  }
+      return `<${tag}${attrs} style="${base}">`;
+    }
+  );
 
-  result = result.replace(/<ul(\s[^>]*)?>/gi, (full, attrs = "") => {
-    attrs = attrs || "";
-    if (/style\s*=/i.test(attrs)) return full;
-    return `<ul${attrs} style="margin:0 0 6px 0;padding-left:18px;">`;
-  });
-  result = result.replace(/<ol(\s[^>]*)?>/gi, (full, attrs = "") => {
-    attrs = attrs || "";
-    if (/style\s*=/i.test(attrs)) return full;
-    return `<ol${attrs} style="margin:0 0 6px 0;padding-left:18px;">`;
-  });
+  result = result.replace(/<ul(\s[^>]*)?>/gi, (full, attrs = "") =>
+    /style\s*=/i.test(attrs || "") ? full : `<ul${attrs || ""} style="margin:0;padding-left:18px;">`
+  );
+  result = result.replace(/<ol(\s[^>]*)?>/gi, (full, attrs = "") =>
+    /style\s*=/i.test(attrs || "") ? full : `<ol${attrs || ""} style="margin:0;padding-left:18px;">`
+  );
 
-  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.35;color:#111;">${result}</div>`;
+  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.4;color:#111111;margin:0;padding:0;">${result}</div>`;
 }
