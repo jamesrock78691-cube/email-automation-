@@ -3,6 +3,7 @@ import fs from "fs";
 import { db } from "@/db";
 import { gmailAccounts, queue, templates, campaigns } from "@/db/schema";
 import { eq, asc, and, or, isNull, lte, sql } from "drizzle-orm";
+import { quillToEmailHtml } from "@/lib/quillToEmailHtml";
 import { readRows, updateRow } from "@/app/services/googleSheets";
 
 export interface SendResult {
@@ -265,7 +266,7 @@ export async function processNextQueueItem(
     `;
   }
 
-  const finalHtml = compileTemplate(rawHtml, variables);
+  const finalHtml = quillToEmailHtml(compileTemplate(rawHtml, variables));
 
   const finalText = rawText.trim()
     ? compileTemplate(rawText, variables)
