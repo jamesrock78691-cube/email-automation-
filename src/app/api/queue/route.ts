@@ -54,6 +54,10 @@ export async function POST(request: NextRequest) {
           .from(templates);
         const validTemplateIds = new Set(allTemplates.map((t) => t.id));
         const firstTemplate = allTemplates[0] || null;
+        const forcedTemplateId =
+  templateId != null && templateId !== ""
+    ? Number(templateId)
+    : null;
 
         let validCampaignId: number | null = null;
         let campaignTemplateId: number | null = null;
@@ -72,7 +76,12 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        const fallbackTemplateId = campaignTemplateId ?? (firstTemplate ? firstTemplate.id : null);
+        const fallbackTemplateId =
+  (forcedTemplateId && validTemplateIds.has(forcedTemplateId)
+    ? forcedTemplateId
+    : null) ??
+  campaignTemplateId ??
+  (firstTemplate ? firstTemplate.id : null);
 
         const rows = items
           .filter((it: any) => it?.email && String(it.email).trim())
