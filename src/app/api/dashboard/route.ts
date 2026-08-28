@@ -135,10 +135,38 @@ export async function GET(request: NextRequest) {
       .from(gmailAccounts);
     const totalGmailCount = totalGmailResult[0]?.value || 0;
 
-    const templatesResult = await db
-      .select({ value: count() })
-      .from(templates);
-    const templatesCount = templatesResult[0]?.value || 0;
+    let templatesCount = 0;
+try {
+  const ownersRow = await db
+    .select()
+    .from(settings)
+    .where(eq(settings.key, "template_owners"))
+    .limit(1);
+  const owners: Record<string, number> = ownersRow.length
+    ? JSON.parse(ownersRow[0].value || "{}")
+    : {};
+
+  const allTpls = await db.select({ id: templates.id }).from(templates);
+
+  if (session) {
+    const role = normalizeRole(session.role, session.username);
+    if (role === "super_admin") {
+      templatesCount = allTpls.filter((t) => {
+        const ownerId = owners[String(t.id)];
+        return ownerId == null || ownerId === session.userId;
+      }).length;
+    } else {
+      templatesCount = allTpls.filter(
+        (t) => owners[String(t.id)] === session.userId
+      ).length;
+    }
+  } else {
+    templatesCount = allTpls.length;
+  }
+} catch {
+  const r = await db.select({ value: count() }).from(templates);
+  templatesCount = r[0]?.value || 0;
+}
 
     const campaignsResult = await db
       .select({ value: count() })
