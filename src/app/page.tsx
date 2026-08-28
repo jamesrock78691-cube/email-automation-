@@ -630,10 +630,10 @@ const quillFormats = [
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          action: "import",
-          items,
-          campaignId: importCampaignId || null,
-        }),
+  action: "import",
+  items,
+  templateId: importTemplateId ? Number(importTemplateId) : null,
+}),
       });
 
       const data = await res.json();
@@ -661,7 +661,10 @@ const quillFormats = [
       const res = await fetch("/api/queue", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "import" }),
+        body: JSON.stringify({
+  action: "import",
+  templateId: importTemplateId ? Number(importTemplateId) : null,
+}),
       });
 
       const data = await res.json();
@@ -2749,21 +2752,21 @@ const handleAttachmentUpload = async (
                     Paste CSV records to simulate automatic synchronization of columns. The system dynamically reads and injects them into the database queue.
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-slate-400">Associate Campaign:</span>
-                  <select
-                    value={importCampaignId}
-                    onChange={(e) => setImportCampaignId(e.target.value)}
-                    className="bg-slate-900 border border-slate-700 text-white rounded text-xs px-2.5 py-1.5 focus:outline-none"
-                  >
-                    {campaigns.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
+<div className="flex items-center gap-2">
+  <span className="text-xs text-slate-400">Select Template:</span>
+  <select
+    value={importTemplateId}
+    onChange={(e) => setImportTemplateId(e.target.value)}
+    className="bg-slate-900 border border-slate-700 text-white rounded text-xs px-2.5 py-1.5 focus:outline-none min-w-[220px]"
+  >
+    <option value="">— Choose Template —</option>
+    {templates.map((t: any) => (
+      <option key={t.id} value={String(t.id)}>
+        #{t.id} — {t.name || "Untitled"}
+      </option>
+    ))}
+  </select>
+</div>
 
               <div className="space-y-2">
                 <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">
