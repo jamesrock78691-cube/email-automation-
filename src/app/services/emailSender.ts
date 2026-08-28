@@ -254,17 +254,22 @@ export async function processNextQueueItem(
     }
   }
 
-  if (!rawHtml) {
-    rawHtml = `
-      <div style="font-family:Arial">
-        <h2>Trademark Advisory</h2>
-        <p>Reference: {{reference_no}}</p>
-        <p>Serial: {{serial_no}}</p>
-        <p>Mark: {{mark_name}}</p>
-        {{tracking_pixel}}
-      </div>
-    `;
-  }
+ if (!rawHtml) {
+  console.error("No template found for queue item id:", item.id, "templateId:", resolvedTemplateId);
+  await db
+    .update(queue)
+    .set({
+      status: "failed",
+      errorMessage: "No template resolved - check templateId on queue/campaign",
+    })
+    .where(eq(queue.id, item.id));
+
+  return {
+    success: false,
+    error: "No template found",
+    processedItemId: item.id,
+  };
+}
 
   const finalHtml = quillToEmailHtml(compileTemplate(rawHtml, variables));
 
