@@ -138,7 +138,13 @@ export async function POST(request: NextRequest) {
       }
 
       try {
-        const result = await importPendingRowsToQueue();
+        const forcedId =
+  templateId != null && templateId !== ""
+    ? Number(templateId)
+    : null;
+const result = await importPendingRowsToQueue(
+  forcedId && !Number.isNaN(forcedId) ? forcedId : null
+);
         return NextResponse.json(result);
       } catch (sheetErr: any) {
         return NextResponse.json(
