@@ -2767,7 +2767,7 @@ const handleAttachmentUpload = async (
     ))}
   </select>
 </div>
-
+</div>   {/* ← YE LINE ADD KARO – flex justify-between close */}
               <div className="space-y-2">
                 <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">
                   Mandatory Frozen Sheet Columns:
