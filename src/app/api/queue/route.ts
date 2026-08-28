@@ -18,7 +18,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { action, items, campaignId } = body;
+    const { action, items, campaignId, templateId } = body;
 
     const host = request.headers.get("host") || "localhost:3000";
     const protocol = host.startsWith("localhost") ? "http" : "https";
