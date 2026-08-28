@@ -209,7 +209,7 @@ const quillFormats = [
 
   // Spreadsheet Simulator text State
   const [spreadsheetText, setSpreadsheetText] = useState("");
-  const [importCampaignId, setImportCampaignId] = useState("1");
+  const [importTemplateId, setImportTemplateId] = useState<string>("");
 
   // Worker Auto-Runner State
   const [autoRunActive, setAutoRunActive] = useState(false);
