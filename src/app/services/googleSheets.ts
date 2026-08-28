@@ -194,7 +194,7 @@ export async function getPendingRows() {
   return pendingRows;
 }
 
-export async function importPendingRowsToQueue() {
+export async function importPendingRowsToQueue(forcedTemplateId?: number | null) {
   const rows = await getPendingRows();
   console.log("TOTAL ROWS TO IMPORT:", rows.length);
 
