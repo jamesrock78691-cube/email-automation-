@@ -203,7 +203,11 @@ export async function importPendingRowsToQueue(forcedTemplateId?: number | null)
     allTemplates.map((t) => [t.name.trim().toLowerCase(), t.id])
   );
   const fallbackTemplateId =
-    allTemplates.length > 0 ? allTemplates[0].id : null;
+  forcedTemplateId != null && allTemplates.some((t) => t.id === forcedTemplateId)
+    ? forcedTemplateId
+    : allTemplates.length > 0
+    ? allTemplates[0].id
+    : null;
 
   let imported = 0;
   let skipped = 0;
