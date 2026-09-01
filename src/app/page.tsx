@@ -785,27 +785,65 @@ const [manualSending, setManualSending] = useState(false);
     return out;
   };
 
-  const handleSelectTemplate = (templateId: string) => {
-    setSelectedTemplateId(templateId);
-    if (!templateId) return;
-    const tpl = templates.find((t: any) => String(t.id) === String(templateId));
-    if (!tpl) return;
+ // Fetch next global auto-increment Reference Number (starts at 1111, shared by all operators)
+const fetchNextReferenceNo = async (): Promise<string | null> => {
+  try {
+    const res = await fetch("/api/reference-no", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json();
+    if (data.success && data.referenceNo) {
+      return String(data.referenceNo);
+    }
+    console.error("Failed to get next reference no:", data.error);
+    return null;
+  } catch (err) {
+    console.error("fetchNextReferenceNo error:", err);
+    return null;
+  }
+};
 
-    const vars = {
-      ...composeVariables,
-      email: composeVariables.email || manualEmailForm.to || "",
-      today: composeVariables.today || new Date().toISOString().slice(0, 10),
-    };
+const handleSelectTemplate = async (templateId: string) => {
+  setSelectedTemplateId(templateId);
+  if (!templateId) return;
+  const tpl = templates.find((t: any) => String(t.id) === String(templateId));
+  if (!tpl) return;
 
-    const subject = applyVariables(tpl.subject || "", vars);
-    const html = applyVariables(tpl.bodyHtml || tpl.body_html || "", vars);
+  // Auto-assign next Reference Number only if empty (one number per compose session)
+  let refNo = composeVariables.reference_no;
+  if (!refNo || refNo.trim() === "") {
+    const nextRef = await fetchNextReferenceNo();
+    if (nextRef) {
+      refNo = nextRef;
+    }
+  }
 
-    setManualEmailForm((prev) => ({
-      ...prev,
-      subject,
-      html,
-    }));
+  const vars = {
+    ...composeVariables,
+    reference_no: refNo || composeVariables.reference_no || "",
+    email: composeVariables.email || manualEmailForm.to || "",
+    today: composeVariables.today || new Date().toISOString().slice(0, 10),
   };
+
+  // Update variables state so the upper box shows the auto number
+  if (refNo && refNo !== composeVariables.reference_no) {
+    setComposeVariables((prev) => ({
+      ...prev,
+      reference_no: refNo!,
+    }));
+  }
+
+  const subject = applyVariables(tpl.subject || "", vars);
+  const html = applyVariables(tpl.bodyHtml || tpl.body_html || "", vars);
+
+  setManualEmailForm((prev) => ({
+    ...prev,
+    subject,
+    html,
+  }));
+};
 
   // Re-apply variables when user changes variable fields (keeps selected template body refreshed)
   const handleVariableChange = (key: string, value: string) => {
@@ -914,6 +952,17 @@ filingDate: composeVariables?.filing_date || "",
         cc: "",
         bcc: "",
       }));
+// Clear variables so next email gets a fresh auto Reference No
+setComposeVariables((prev) => ({
+  ...prev,
+  reference_no: "",
+  serial_no: "",
+  mark_name: "",
+  filing_date: "",
+  email: "",
+}));
+setSelectedTemplateId("");
+      
     } else {
       showError(data.error || "Failed to send");
     }
@@ -2317,15 +2366,20 @@ const handleAttachmentUpload = async (
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-        <div>
-          <label className="text-xs font-medium text-gray-700">Reference No</label>
-          <input
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 mt-1 bg-white text-gray-900 text-sm"
-            value={composeVariables.reference_no}
-            onChange={(e) => handleVariableChange("reference_no", e.target.value)}
-            placeholder="REF-2026-9081"
-          />
-        </div>
+       <div>
+  <label className="text-xs font-medium text-gray-700 flex items-center gap-1.5">
+    Reference No
+    <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">AUTO</span>
+  </label>
+  <input
+    className="w-full border border-gray-300 rounded-lg px-3 py-2 mt-1 bg-gray-100 text-gray-900 text-sm cursor-not-allowed"
+    value={composeVariables.reference_no}
+    readOnly
+    placeholder="Template select karo → auto 1111, 1112..."
+    title="Auto-generated. Starts from 1111 and increases for every operator."
+  />
+  <p className="text-[10px] text-gray-500 mt-0.5">Template select karte hi auto milta hai (1111 se shuru)</p>
+</div>
         <div>
           <label className="text-xs font-medium text-gray-700">Serial No</label>
           <input
