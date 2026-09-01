@@ -204,6 +204,20 @@ export async function seedDatabase() {
       }
     }
 
+// Auto-increment Reference Number counter (starts at 1111)
+const existingRefSetting = await db
+  .select()
+  .from(settings)
+  .where(eq(settings.key, "next_reference_no"))
+  .limit(1);
+if (existingRefSetting.length === 0) {
+  console.log("Seeding next_reference_no starting at 1111...");
+  await db.insert(settings).values({
+    key: "next_reference_no",
+    value: "1111",
+  });
+}
+    
     console.log("Database seeded successfully!");
   } catch (error) {
     console.error("Error seeding database:", error);
