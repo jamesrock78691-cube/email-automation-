@@ -1,12 +1,125 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { gmailAccounts } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { gmailAccounts, settings } from "@/db/schema";
+import { eq, inArray } from "drizzle-orm";
+import { createHmac, timingSafeEqual } from "crypto";
 
-// GET accounts
-export async function GET() {
+const SECRET =
+  process.env.AUTH_SECRET ||
+  process.env.DATABASE_URL ||
+  "email-automation-v1-dev-secret-change-me";
+
+function verifyToken(token: string): {
+  userId: number;
+  username: string;
+  role: string;
+} | null {
   try {
-    const list = await db.select().from(gmailAccounts).orderBy(gmailAccounts.id);
+    if (!token || !token.includes(".")) return null;
+    const [payloadB64, sig] = token.split(".");
+    const expected = createHmac("sha256", SECRET)
+      .update(payloadB64)
+      .digest("hex");
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+    const json = Buffer.from(
+      payloadB64.replace(/-/g, "+").replace(/_/g, "/"),
+      "base64"
+    ).toString("utf8");
+    const payload = JSON.parse(json);
+    if (!payload?.userId || Date.now() > payload.exp) return null;
+    return {
+      userId: payload.userId,
+      username: payload.username || "",
+      role: payload.role || "operator",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getSession(req: NextRequest) {
+  const auth = req.headers.get("authorization");
+  const token = auth?.startsWith("Bearer ")
+    ? auth.slice(7).trim()
+    : req.cookies.get("ea_session")?.value;
+  if (!token) return null;
+  return verifyToken(token);
+}
+
+function normalizeRole(role: string, username?: string) {
+  const r = (role || "").toLowerCase().trim();
+  if (
+    r === "super_admin" ||
+    username === "admin" ||
+    username === "superadmin"
+  ) {
+    return "super_admin";
+  }
+  if (r === "admin") return "admin";
+  return "operator";
+}
+
+async function getSmtpAssignments(): Promise<Record<string, number[]>> {
+  try {
+    const rows = await db
+      .select()
+      .from(settings)
+      .where(eq(settings.key, "smtp_assignments"))
+      .limit(1);
+    if (!rows.length) return {};
+    const map = JSON.parse(rows[0].value || "{}");
+    return map && typeof map === "object" ? map : {};
+  } catch {
+    return {};
+  }
+}
+
+// GET accounts — role-aware, passwords hidden for operators
+export async function GET(request: NextRequest) {
+  try {
+    const session = getSession(request);
+    if (!session) {
+      return NextResponse.json(
+        { success: false, error: "Unauthorized" },
+        { status: 401 }
+      );
+    }
+
+    const role = normalizeRole(session.role, session.username);
+    let list: any[] = [];
+
+    if (role === "operator") {
+      const assignments = await getSmtpAssignments();
+      const allowedIds: number[] = (
+        assignments[String(session.userId)] ||
+        assignments[session.username] ||
+        []
+      )
+        .map((id: any) => Number(id))
+        .filter((id: number) => !isNaN(id) && id > 0);
+
+      if (allowedIds.length > 0) {
+        list = await db
+          .select()
+          .from(gmailAccounts)
+          .where(inArray(gmailAccounts.id, allowedIds))
+          .orderBy(gmailAccounts.id);
+      } else {
+        list = [];
+      }
+
+      // Always strip password for operators
+      list = list.map((a) => {
+        const { appPassword, ...rest } = a;
+        return rest;
+      });
+    } else {
+      // admin / super_admin see everything
+      list = await db.select().from(gmailAccounts).orderBy(gmailAccounts.id);
+    }
+
     return NextResponse.json({ success: true, list });
   } catch (error: any) {
     return NextResponse.json(
@@ -16,9 +129,24 @@ export async function GET() {
   }
 }
 
-// POST: Add new account
+// POST: Add new account (admin/super only)
 export async function POST(request: NextRequest) {
   try {
+    const session = getSession(request);
+    if (!session) {
+      return NextResponse.json(
+        { success: false, error: "Unauthorized" },
+        { status: 401 }
+      );
+    }
+    const role = normalizeRole(session.role, session.username);
+    if (role === "operator") {
+      return NextResponse.json(
+        { success: false, error: "Forbidden" },
+        { status: 403 }
+      );
+    }
+
     const body = await request.json();
 
     const {
@@ -70,9 +198,24 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// PUT: Update account
+// PUT: Update account (admin/super only)
 export async function PUT(request: NextRequest) {
   try {
+    const session = getSession(request);
+    if (!session) {
+      return NextResponse.json(
+        { success: false, error: "Unauthorized" },
+        { status: 401 }
+      );
+    }
+    const role = normalizeRole(session.role, session.username);
+    if (role === "operator") {
+      return NextResponse.json(
+        { success: false, error: "Forbidden" },
+        { status: 403 }
+      );
+    }
+
     const body = await request.json();
 
     const {
@@ -136,9 +279,24 @@ export async function PUT(request: NextRequest) {
   }
 }
 
-// DELETE: Remove account
+// DELETE: Remove account (admin/super only)
 export async function DELETE(request: NextRequest) {
   try {
+    const session = getSession(request);
+    if (!session) {
+      return NextResponse.json(
+        { success: false, error: "Unauthorized" },
+        { status: 401 }
+      );
+    }
+    const role = normalizeRole(session.role, session.username);
+    if (role === "operator") {
+      return NextResponse.json(
+        { success: false, error: "Forbidden" },
+        { status: 403 }
+      );
+    }
+
     const { searchParams } = new URL(request.url);
     const id = searchParams.get("id");
 
