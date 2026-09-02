@@ -2,7 +2,7 @@ import nodemailer from "nodemailer";
 import fs from "fs";
 import { db } from "@/db";
 import { gmailAccounts, queue, templates, campaigns } from "@/db/schema";
-import { eq, asc, and, or, isNull, lte, sql } from "drizzle-orm";
+import { eq, asc, and, or, isNull, lte } from "drizzle-orm";
 import { quillToEmailHtml } from "@/lib/quillToEmailHtml";
 import { readRows, updateRow } from "@/app/services/googleSheets";
 
@@ -31,6 +31,7 @@ function classifyError(errorMessage: string): {
   type: "auth" | "rate_limit" | "permanent" | "temporary";
   shouldDisableAccount: boolean;
   retryable: boolean;
+  isDailyLimit: boolean;
 } {
   const msg = (errorMessage || "").toLowerCase();
 
@@ -43,20 +44,36 @@ function classifyError(errorMessage: string): {
     msg.includes("535") ||
     msg.includes("534")
   ) {
-    return { type: "auth", shouldDisableAccount: true, retryable: false };
+    return {
+      type: "auth",
+      shouldDisableAccount: true,
+      retryable: false,
+      isDailyLimit: false,
+    };
   }
 
-  // Rate limit / quota
+  // Rate limit / quota / daily sending limit (check BEFORE generic 550)
   if (
+    msg.includes("daily user sending limit") ||
+    msg.includes("daily sending limit") ||
+    msg.includes("5.4.5") ||
     msg.includes("rate limit") ||
     msg.includes("too many") ||
     msg.includes("quota") ||
-    msg.includes("daily") ||
     msg.includes("421") ||
     msg.includes("450") ||
     msg.includes("452")
   ) {
-    return { type: "rate_limit", shouldDisableAccount: false, retryable: true };
+    const isDaily =
+      msg.includes("daily") ||
+      msg.includes("5.4.5") ||
+      msg.includes("quota exceeded");
+    return {
+      type: "rate_limit",
+      shouldDisableAccount: false,
+      retryable: true,
+      isDailyLimit: isDaily,
+    };
   }
 
   // Permanent recipient / content errors
@@ -71,11 +88,21 @@ function classifyError(errorMessage: string): {
     msg.includes("554") ||
     msg.includes("invalid address")
   ) {
-    return { type: "permanent", shouldDisableAccount: false, retryable: false };
+    return {
+      type: "permanent",
+      shouldDisableAccount: false,
+      retryable: false,
+      isDailyLimit: false,
+    };
   }
 
   // Default = temporary
-  return { type: "temporary", shouldDisableAccount: false, retryable: true };
+  return {
+    type: "temporary",
+    shouldDisableAccount: false,
+    retryable: true,
+    isDailyLimit: false,
+  };
 }
 
 // ===== Exponential backoff (seconds) =====
@@ -96,8 +123,6 @@ export async function processNextQueueItem(
   const todayLocal = now.toLocaleDateString("en-CA");
 
   // 1. Get next eligible pending email
-  //    - status = pending
-  //    - retryAfter is null OR retryAfter <= now
   const pendingItems = await db
     .select()
     .from(queue)
@@ -125,13 +150,15 @@ export async function processNextQueueItem(
     .from(gmailAccounts)
     .where(eq(gmailAccounts.status, "enabled"));
 
-  // 3. Daily + Minute reset
+  // 3. Daily + Minute reset (calendar day + rolling minute)
   for (const acc of accounts) {
     const updates: any = {};
     let needsUpdate = false;
 
     if (acc.lastUsedAt) {
-      const lastUsedLocal = new Date(acc.lastUsedAt).toLocaleDateString("en-CA");
+      const lastUsedLocal = new Date(acc.lastUsedAt).toLocaleDateString(
+        "en-CA"
+      );
       if (lastUsedLocal !== todayLocal) {
         updates.sentToday = 0;
         needsUpdate = true;
@@ -153,6 +180,12 @@ export async function processNextQueueItem(
       needsUpdate = true;
     }
 
+    // Clear expired cooldown
+    if (acc.cooldownUntil && acc.cooldownUntil <= now) {
+      updates.cooldownUntil = null;
+      needsUpdate = true;
+    }
+
     if (needsUpdate) {
       await db
         .update(gmailAccounts)
@@ -162,6 +195,7 @@ export async function processNextQueueItem(
       if (updates.sentToday !== undefined) acc.sentToday = updates.sentToday;
       if (updates.sentThisMinute !== undefined)
         acc.sentThisMinute = updates.sentThisMinute;
+      if (updates.cooldownUntil === null) acc.cooldownUntil = null as any;
     }
   }
 
@@ -174,9 +208,9 @@ export async function processNextQueueItem(
   });
 
   if (healthyAccounts.length === 0) {
-    // No account available right now → schedule retry later
+    // No account available → schedule this item later, but do not hard-fail
     const retryAfter = new Date();
-    retryAfter.setMinutes(retryAfter.getMinutes() + 2);
+    retryAfter.setMinutes(retryAfter.getMinutes() + 5);
 
     await db
       .update(queue)
@@ -184,7 +218,8 @@ export async function processNextQueueItem(
         status: "pending",
         retryAfter,
         lastErrorType: "rate_limit",
-        errorMessage: "No available Gmail accounts right now. Will retry later.",
+        errorMessage:
+          "No available Gmail/SMTP accounts right now (limit or cooldown). Will retry later.",
       })
       .where(eq(queue.id, item.id));
 
@@ -195,10 +230,14 @@ export async function processNextQueueItem(
     };
   }
 
-  // Health-aware sort: high priority, low errorCount
+  // Health-aware sort: high priority, low errorCount, least recently used
   healthyAccounts.sort((a, b) => {
     if (b.priority !== a.priority) return b.priority - a.priority;
-    return (a.errorCount || 0) - (b.errorCount || 0);
+    if ((a.errorCount || 0) !== (b.errorCount || 0))
+      return (a.errorCount || 0) - (b.errorCount || 0);
+    const aTime = a.lastUsedAt ? new Date(a.lastUsedAt).getTime() : 0;
+    const bTime = b.lastUsedAt ? new Date(b.lastUsedAt).getTime() : 0;
+    return aTime - bTime;
   });
 
   // 5. Prepare email content
@@ -254,22 +293,27 @@ export async function processNextQueueItem(
     }
   }
 
- if (!rawHtml) {
-  console.error("No template found for queue item id:", item.id, "templateId:", resolvedTemplateId);
-  await db
-    .update(queue)
-    .set({
-      status: "failed",
-      errorMessage: "No template resolved - check templateId on queue/campaign",
-    })
-    .where(eq(queue.id, item.id));
+  if (!rawHtml) {
+    console.error(
+      "No template found for queue item id:",
+      item.id,
+      "templateId:",
+      resolvedTemplateId
+    );
+    await db
+      .update(queue)
+      .set({
+        status: "failed",
+        errorMessage: "No template resolved - check templateId on queue/campaign",
+      })
+      .where(eq(queue.id, item.id));
 
-  return {
-    success: false,
-    error: "No template found",
-    processedItemId: item.id,
-  };
-}
+    return {
+      success: false,
+      error: "No template found",
+      processedItemId: item.id,
+    };
+  }
 
   const finalHtml = quillToEmailHtml(compileTemplate(rawHtml, variables));
 
@@ -320,15 +364,15 @@ export async function processNextQueueItem(
 
   const currentTries = item.tries + 1;
 
-  // 7. Try accounts (failover)
+  // 7. Try accounts (rotation: each account up to 3 attempts, then next)
   let transportSuccess = false;
   let transportError = "";
   let finalUsedAccount: any = null;
   let lastClassified: ReturnType<typeof classifyError> | null = null;
 
-  // Rotation: try each account up to 3 times, then switch to next
   for (const account of healthyAccounts) {
     let accountGaveUp = false;
+
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         const transporter = nodemailer.createTransport({
@@ -349,7 +393,10 @@ export async function processNextQueueItem(
 
         await transporter.sendMail({
           from: `"${account.senderName}" <${(account as any).fromEmail || account.email}>`,
-          replyTo: account.replyToEmail || (account as any).fromEmail || account.email,
+          replyTo:
+            account.replyToEmail ||
+            (account as any).fromEmail ||
+            account.email,
           to: item.email,
           cc: item.cc || undefined,
           bcc: item.bcc || undefined,
@@ -365,7 +412,10 @@ export async function processNextQueueItem(
         break;
       } catch (err: any) {
         transportError = err?.message || String(err);
-        console.error(`SMTP ERROR on ${account.email} attempt ${attempt}/3:`, err);
+        console.error(
+          `SMTP ERROR on ${account.email} attempt ${attempt}/3:`,
+          err
+        );
 
         const classified = classifyError(transportError);
         lastClassified = classified;
@@ -374,47 +424,76 @@ export async function processNextQueueItem(
         const cooldownTime = new Date();
 
         if (classified.type === "auth") {
-          cooldownTime.setMinutes(cooldownTime.getMinutes() + 30);
+          cooldownTime.setMinutes(cooldownTime.getMinutes() + 60);
+        } else if (classified.isDailyLimit) {
+          // Gmail daily limit → long cooldown (18 hours)
+          cooldownTime.setHours(cooldownTime.getHours() + 18);
+          // Also mark sentToday to limit so it stays filtered until reset
+          await db
+            .update(gmailAccounts)
+            .set({
+              errorCount: newErrCount,
+              status:
+                classified.shouldDisableAccount || newErrCount >= 8
+                  ? "disabled"
+                  : "enabled",
+              cooldownUntil: cooldownTime,
+              lastUsedAt: new Date(),
+              sentToday: account.dailyLimit || 500,
+            })
+            .where(eq(gmailAccounts.id, account.id));
         } else if (classified.type === "rate_limit") {
-          cooldownTime.setMinutes(cooldownTime.getMinutes() + 5);
+          cooldownTime.setMinutes(cooldownTime.getMinutes() + 15);
         } else {
-          cooldownTime.setSeconds(cooldownTime.getSeconds() + 20);
+          cooldownTime.setSeconds(cooldownTime.getSeconds() + 30);
         }
 
-        await db
-          .update(gmailAccounts)
-          .set({
-            errorCount: newErrCount,
-            status:
-              classified.shouldDisableAccount || newErrCount >= 5
-                ? "disabled"
-                : "enabled",
-            cooldownUntil: cooldownTime,
-            lastUsedAt: new Date(),
-          })
-          .where(eq(gmailAccounts.id, account.id));
+        if (!classified.isDailyLimit) {
+          await db
+            .update(gmailAccounts)
+            .set({
+              errorCount: newErrCount,
+              status:
+                classified.shouldDisableAccount || newErrCount >= 8
+                  ? "disabled"
+                  : "enabled",
+              cooldownUntil: cooldownTime,
+              lastUsedAt: new Date(),
+            })
+            .where(eq(gmailAccounts.id, account.id));
+        }
 
+        // Auth or permanent → leave this account immediately
         if (classified.type === "permanent" || classified.type === "auth") {
           accountGaveUp = true;
-          break; // don't retry this account; try next
+          break;
+        }
+
+        // Daily limit → leave this account immediately and try next SMTP
+        if (classified.isDailyLimit) {
+          accountGaveUp = true;
+          break;
         }
 
         if (attempt >= 3) {
           accountGaveUp = true;
           break; // 3 failures → next SMTP
         }
-        // brief pause before retry
-        await new Promise((r) => setTimeout(r, 800));
+
+        // brief pause before retry same account
+        await new Promise((r) => setTimeout(r, 1000));
       }
     }
+
     if (transportSuccess) break;
+    // If permanent on this recipient, no point trying other SMTPs
     if (lastClassified?.type === "permanent") break;
   }
 
   // 8. Success
   if (transportSuccess && finalUsedAccount) {
     const cooldownUntil = new Date();
-    cooldownUntil.setSeconds(cooldownUntil.getSeconds() + 20);
+    cooldownUntil.setSeconds(cooldownUntil.getSeconds() + 15);
 
     await db
       .update(gmailAccounts)
