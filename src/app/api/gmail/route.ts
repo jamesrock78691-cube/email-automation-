@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { gmailAccounts, settings } from "@/db/schema";
 import { eq, inArray } from "drizzle-orm";
 import { createHmac, timingSafeEqual } from "crypto";
+import { shouldResetDailyQuota } from "@/lib/dailyQuota";
 
 const SECRET =
   process.env.AUTH_SECRET ||
@@ -118,6 +119,24 @@ export async function GET(request: NextRequest) {
     } else {
       // admin / super_admin see everything
       list = await db.select().from(gmailAccounts).orderBy(gmailAccounts.id);
+    }
+
+    // Lazy daily reset at 07:00 Asia/Karachi so UI shows correct remaining
+    const now = new Date();
+    for (let i = 0; i < list.length; i++) {
+      const acc = list[i];
+      if (shouldResetDailyQuota(acc.lastUsedAt, now) && (acc.sentToday || 0) > 0) {
+        try {
+          await db
+            .update(gmailAccounts)
+            .set({ sentToday: 0 })
+            .where(eq(gmailAccounts.id, acc.id));
+          list[i] = { ...acc, sentToday: 0 };
+        } catch {
+          /* non-fatal — still return zeroed in response */
+          list[i] = { ...acc, sentToday: 0 };
+        }
+      }
     }
 
     return NextResponse.json({ success: true, list });
