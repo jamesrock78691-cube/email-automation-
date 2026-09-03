@@ -6,6 +6,7 @@ import { gmailAccounts, settings } from "@/db/schema";
 import { eq, and, desc } from "drizzle-orm";
 import { appendManualSentLog } from "@/app/services/googleSheets";
 import { randomUUID } from "crypto";
+import { shouldResetDailyQuota } from "@/lib/dailyQuota";
 
 async function getSmtpAssignments(): Promise<Record<string, number[]>> {
   try {
@@ -80,6 +81,17 @@ export async function POST(request: NextRequest) {
       String(body.isSuperAdmin || "") === "true" ||
       String(body.role || "").toLowerCase() === "super_admin";
 
+    // Apply PKT 07:00 daily reset before limit checks (lazy reset)
+    async function applyDailyReset(acc: any): Promise<any> {
+      if (!acc) return acc;
+      if (!shouldResetDailyQuota(acc.lastUsedAt, now)) return acc;
+      await db
+        .update(gmailAccounts)
+        .set({ sentToday: 0 })
+        .where(eq(gmailAccounts.id, acc.id));
+      return { ...acc, sentToday: 0 };
+    }
+
     if (smtpAccountId) {
       const rows = await db
         .select()
@@ -104,6 +116,15 @@ export async function POST(request: NextRequest) {
           { status: 403 }
         );
       }
+      account = await applyDailyReset(account);
+      if (
+        account &&
+        (account.cooldownUntil && account.cooldownUntil > now
+          ? true
+          : (account.sentToday || 0) >= (account.dailyLimit || 500))
+      ) {
+        // keep account but fail below if over limit / cooldown
+      }
     } else {
       const rows = await db
         .select()
@@ -125,8 +146,14 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      // Reset each candidate so limit check uses today's quota day (07:00 PKT)
+      const refreshed: any[] = [];
+      for (const a of allowed) {
+        refreshed.push(await applyDailyReset(a));
+      }
+
       account =
-        allowed.find(
+        refreshed.find(
           (a) =>
             (!a.cooldownUntil || a.cooldownUntil <= now) &&
             (a.sentToday || 0) < (a.dailyLimit || 500)
@@ -134,6 +161,21 @@ export async function POST(request: NextRequest) {
     }
 
     if (!account) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "No available SMTP account (all disabled, cooldown, or daily limit reached).",
+        },
+        { status: 400 }
+      );
+    }
+
+    // Explicit single-account path: still enforce limit after reset
+    if (
+      (account.cooldownUntil && account.cooldownUntil > now) ||
+      (account.sentToday || 0) >= (account.dailyLimit || 500)
+    ) {
       return NextResponse.json(
         {
           success: false,
