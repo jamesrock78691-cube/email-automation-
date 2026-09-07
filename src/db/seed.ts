@@ -1,10 +1,24 @@
-import { db } from "./index";
+import { db, pool } from "./index";
 import { users, gmailAccounts, templates, campaigns, queue, settings } from "./schema";
 import { eq } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 
+async function ensureTrackingLogColumns() {
+  try {
+    await pool.query(`
+      ALTER TABLE tracking_logs ADD COLUMN IF NOT EXISTS email text;
+      ALTER TABLE tracking_logs ADD COLUMN IF NOT EXISTS mark_name text;
+      ALTER TABLE tracking_logs ADD COLUMN IF NOT EXISTS reference_no text;
+    `);
+  } catch (err) {
+    console.error("ensureTrackingLogColumns:", err);
+  }
+}
+
 export async function seedDatabase() {
   try {
+    await ensureTrackingLogColumns();
+
     // Check if user exists
     const existingUsers = await db.select().from(users).limit(1);
     if (existingUsers.length === 0) {
