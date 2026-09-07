@@ -147,6 +147,10 @@ export const trackingLogs = pgTable("tracking_logs", {
   browser: text("browser"),
   device: text("device"),
   country: text("country"),
+  // Denormalized for manual sends (queueId is null)
+  email: text("email"),
+  markName: text("mark_name"),
+  referenceNo: text("reference_no"),
 });
 
 // General Settings
