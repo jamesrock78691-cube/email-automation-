@@ -1,1 +1,1 @@
-PLACEHOLDER
+@file:/home/workdir/artifacts/page.tsx.new
