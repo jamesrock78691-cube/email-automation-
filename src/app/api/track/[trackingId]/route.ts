@@ -9,29 +9,62 @@ const TRANSPARENT_PNG = Buffer.from(
   "base64"
 );
 
+function pixelResponse() {
+  return new NextResponse(TRANSPARENT_PNG, {
+    headers: {
+      "Content-Type": "image/png",
+      "Cache-Control": "no-store, no-cache, must-revalidate, private, max-age=0",
+      Pragma: "no-cache",
+      Expires: "0",
+    },
+  });
+}
+
+function parseClient(request: NextRequest) {
+  const userAgent = request.headers.get("user-agent") || "Unknown Browser";
+  const ipAddress =
+    request.headers.get("x-forwarded-for") ||
+    request.headers.get("x-real-ip") ||
+    "127.0.0.1";
+
+  let browser = "Other";
+  if (userAgent.includes("Firefox")) browser = "Firefox";
+  else if (userAgent.includes("Chrome")) browser = "Chrome";
+  else if (userAgent.includes("Safari")) browser = "Safari";
+  else if (userAgent.includes("Edge")) browser = "Edge";
+  else if (userAgent.includes("MSIE")) browser = "Internet Explorer";
+
+  let device = "Desktop";
+  if (
+    userAgent.includes("Mobile") ||
+    userAgent.includes("Android") ||
+    userAgent.includes("iPhone")
+  ) {
+    device = "Mobile";
+  }
+
+  return { userAgent, ipAddress, browser, device };
+}
+
 export async function GET(
   request: NextRequest,
   context: { params: Promise<{ trackingId: string }> }
 ) {
   try {
     const { trackingId } = await context.params;
-    if (!trackingId) {
-      return new NextResponse(TRANSPARENT_PNG, {
-        headers: { "Content-Type": "image/png" },
-      });
-    }
+    if (!trackingId) return pixelResponse();
 
-    // 1. Find corresponding queue item
     const matchedQueue = await db
       .select()
       .from(queue)
       .where(eq(queue.trackingId, trackingId))
       .limit(1);
 
+    const { userAgent, ipAddress, browser, device } = parseClient(request);
+
     if (matchedQueue.length > 0) {
       const qItem = matchedQueue[0];
 
-      // 2. Increment open counts
       await db
         .update(queue)
         .set({
@@ -40,46 +73,34 @@ export async function GET(
         })
         .where(eq(queue.id, qItem.id));
 
-      // 3. Log user tracking metadata
-      const userAgent = request.headers.get("user-agent") || "Unknown Browser";
-      const ipAddress = request.headers.get("x-forwarded-for") || request.headers.get("x-real-ip") || "127.0.0.1";
-      
-      // Basic browser/device extractor
-      let browser = "Other";
-      if (userAgent.includes("Firefox")) browser = "Firefox";
-      else if (userAgent.includes("Chrome")) browser = "Chrome";
-      else if (userAgent.includes("Safari")) browser = "Safari";
-      else if (userAgent.includes("Edge")) browser = "Edge";
-      else if (userAgent.includes("MSIE")) browser = "Internet Explorer";
-
-      let device = "Desktop";
-      if (userAgent.includes("Mobile") || userAgent.includes("Android") || userAgent.includes("iPhone")) {
-        device = "Mobile";
-      }
-
       await db.insert(trackingLogs).values({
         queueId: qItem.id,
-        trackingId: trackingId,
-        ipAddress: ipAddress,
-        userAgent: userAgent,
-        browser: browser,
-        device: device,
+        trackingId,
+        ipAddress,
+        userAgent,
+        browser,
+        device,
         openedAt: new Date(),
       });
-
-      console.log(`[TRACKING PIXEL] Logged email open for trackId: ${trackingId}, IP: ${ipAddress}`);
+    } else {
+      // Manual-send emails are not in queue — still log the open
+      await db.insert(trackingLogs).values({
+        queueId: null,
+        trackingId,
+        ipAddress,
+        userAgent,
+        browser,
+        device,
+        openedAt: new Date(),
+      });
     }
+
+    console.log(
+      `[TRACKING PIXEL] Logged email open for trackId: ${trackingId}, IP: ${ipAddress}`
+    );
   } catch (error) {
     console.error("Error in open tracking route:", error);
   }
 
-  // Always return the pixel image, never fail so the email looks perfect!
-  return new NextResponse(TRANSPARENT_PNG, {
-    headers: {
-      "Content-Type": "image/png",
-      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-      "Pragma": "no-cache",
-      "Expires": "0",
-    },
-  });
+  return pixelResponse();
 }
