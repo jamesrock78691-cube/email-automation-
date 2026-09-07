@@ -222,7 +222,7 @@ try {
       });
     }
 
-    // leftJoin so manual opens (queueId null) still appear on dashboard
+    // leftJoin so manual opens (queueId null) still appear; prefer log denormalized fields
     const recentOpensRaw = await db
       .select({
         id: trackingLogs.id,
@@ -233,10 +233,13 @@ try {
         device: trackingLogs.device,
         trackingId: trackingLogs.trackingId,
         queueId: trackingLogs.queueId,
-        referenceNo: queue.referenceNo,
+        logEmail: trackingLogs.email,
+        logMarkName: trackingLogs.markName,
+        logReferenceNo: trackingLogs.referenceNo,
+        queueReferenceNo: queue.referenceNo,
         serialNo: queue.serialNo,
-        markName: queue.markName,
-        email: queue.email,
+        queueMarkName: queue.markName,
+        queueEmail: queue.email,
       })
       .from(trackingLogs)
       .leftJoin(queue, eq(trackingLogs.queueId, queue.id))
@@ -246,11 +249,24 @@ try {
     const recentOpens = recentOpensRaw.map((op) => {
       const isManual = op.queueId == null;
       return {
-        ...op,
+        id: op.id,
+        openedAt: op.openedAt,
+        ipAddress: op.ipAddress,
+        userAgent: op.userAgent,
+        browser: op.browser,
+        device: op.device,
+        trackingId: op.trackingId,
+        queueId: op.queueId,
         source: isManual ? "manual" : "auto",
-        referenceNo: op.referenceNo || (isManual ? "MANUAL" : "—"),
-        markName: op.markName || (isManual ? "Manual Send" : "—"),
-        email: op.email || "",
+        referenceNo:
+          op.queueReferenceNo ||
+          op.logReferenceNo ||
+          (isManual ? "MANUAL" : "—"),
+        markName:
+          op.queueMarkName ||
+          op.logMarkName ||
+          (isManual ? "Manual Send" : "—"),
+        email: op.queueEmail || op.logEmail || "",
         serialNo: op.serialNo || "",
       };
     });
