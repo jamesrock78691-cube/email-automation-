@@ -87,6 +87,9 @@ export async function GET(
         browser,
         device,
         openedAt,
+        email: qItem.email || null,
+        markName: qItem.markName || null,
+        referenceNo: qItem.referenceNo || null,
       });
 
       // Auto sheet Open Count / Opened At
@@ -94,7 +97,22 @@ export async function GET(
         console.error("auto sheet open update failed:", err)
       );
     } else {
-      // Manual-send emails are not in queue — still log the open
+      // Manual-send: update Google Sheet first so we can store email on the log
+      let manualEmail: string | null = null;
+      let manualMark: string | null = null;
+      let manualRef: string | null = null;
+
+      try {
+        const sheetRes = await recordOpenOnManualSheet(trackingId, openedAtIso);
+        if (sheetRes?.success) {
+          manualEmail = (sheetRes as any).email || null;
+          manualMark = (sheetRes as any).markName || null;
+          manualRef = (sheetRes as any).referenceNo || null;
+        }
+      } catch (err) {
+        console.error("manual sheet open update failed:", err);
+      }
+
       await db.insert(trackingLogs).values({
         queueId: null,
         trackingId,
@@ -103,12 +121,10 @@ export async function GET(
         browser,
         device,
         openedAt,
+        email: manualEmail,
+        markName: manualMark || "Manual Send",
+        referenceNo: manualRef || "MANUAL",
       });
-
-      // Manual sheet Open Count / Opened At
-      recordOpenOnManualSheet(trackingId, openedAtIso).catch((err) =>
-        console.error("manual sheet open update failed:", err)
-      );
     }
 
     console.log(
