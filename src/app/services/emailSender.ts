@@ -5,6 +5,10 @@ import { gmailAccounts, queue, templates, campaigns } from "@/db/schema";
 import { eq, asc, and, or, isNull, lte } from "drizzle-orm";
 import { quillToEmailHtml } from "@/lib/quillToEmailHtml";
 import { readRows, updateRow } from "@/app/services/googleSheets";
+import {
+  buildTrackingPixelHtml,
+  injectTrackingPixel,
+} from "@/lib/trackingPixel";
 
 export interface SendResult {
   success: boolean;
@@ -248,7 +252,7 @@ export async function processNextQueueItem(
     day: "numeric",
   });
 
-  const trackingPixelHtml = `<img src="${baseUrl}/api/track/${item.trackingId}" width="1" height="1" style="display:none"/>`;
+  const trackingPixelHtml = buildTrackingPixelHtml(baseUrl, item.trackingId);
 
   const variables = {
     reference_no: item.referenceNo || "",
@@ -315,11 +319,12 @@ export async function processNextQueueItem(
     };
   }
 
-  const finalHtml = quillToEmailHtml(compileTemplate(rawHtml, variables));
+  const compiledHtml = quillToEmailHtml(compileTemplate(rawHtml, variables));
+  const finalHtml = injectTrackingPixel(compiledHtml, trackingPixelHtml);
 
   const finalText = rawText.trim()
     ? compileTemplate(rawText, variables)
-    : finalHtml
+    : compiledHtml
         .replace(/<style[\s\S]*?<\/style>/gi, "")
         .replace(/<script[\s\S]*?<\/script>/gi, "")
         .replace(/<[^>]+>/g, " ")
