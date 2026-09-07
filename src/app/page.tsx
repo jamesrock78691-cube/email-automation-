@@ -1,1 +1,1 @@
-@file:/home/workdir/artifacts/page.tsx.new
+file:///home/workdir/artifacts/page.tsx.new
