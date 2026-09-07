@@ -1,1 +1,1 @@
-file:///home/workdir/artifacts/page.tsx.new
+PLACEHOLDER_WILL_FAIL
