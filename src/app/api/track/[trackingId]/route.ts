@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { queue, trackingLogs } from "@/db/schema";
 import { eq } from "drizzle-orm";
+import {
+  recordOpenOnAutoSheet,
+  recordOpenOnManualSheet,
+} from "@/app/services/googleSheets";
 
 // 1x1 transparent PNG base64
 const TRANSPARENT_PNG = Buffer.from(
@@ -61,6 +65,8 @@ export async function GET(
       .limit(1);
 
     const { userAgent, ipAddress, browser, device } = parseClient(request);
+    const openedAt = new Date();
+    const openedAtIso = openedAt.toISOString();
 
     if (matchedQueue.length > 0) {
       const qItem = matchedQueue[0];
@@ -69,7 +75,7 @@ export async function GET(
         .update(queue)
         .set({
           openCount: qItem.openCount + 1,
-          lastOpenedAt: new Date(),
+          lastOpenedAt: openedAt,
         })
         .where(eq(queue.id, qItem.id));
 
@@ -80,8 +86,13 @@ export async function GET(
         userAgent,
         browser,
         device,
-        openedAt: new Date(),
+        openedAt,
       });
+
+      // Auto sheet Open Count / Opened At
+      recordOpenOnAutoSheet(trackingId, openedAtIso).catch((err) =>
+        console.error("auto sheet open update failed:", err)
+      );
     } else {
       // Manual-send emails are not in queue — still log the open
       await db.insert(trackingLogs).values({
@@ -91,8 +102,13 @@ export async function GET(
         userAgent,
         browser,
         device,
-        openedAt: new Date(),
+        openedAt,
       });
+
+      // Manual sheet Open Count / Opened At
+      recordOpenOnManualSheet(trackingId, openedAtIso).catch((err) =>
+        console.error("manual sheet open update failed:", err)
+      );
     }
 
     console.log(
