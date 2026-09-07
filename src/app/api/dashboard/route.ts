@@ -222,7 +222,8 @@ try {
       });
     }
 
-    const recentOpens = await db
+    // leftJoin so manual opens (queueId null) still appear on dashboard
+    const recentOpensRaw = await db
       .select({
         id: trackingLogs.id,
         openedAt: trackingLogs.openedAt,
@@ -230,15 +231,29 @@ try {
         userAgent: trackingLogs.userAgent,
         browser: trackingLogs.browser,
         device: trackingLogs.device,
+        trackingId: trackingLogs.trackingId,
+        queueId: trackingLogs.queueId,
         referenceNo: queue.referenceNo,
         serialNo: queue.serialNo,
         markName: queue.markName,
         email: queue.email,
       })
       .from(trackingLogs)
-      .innerJoin(queue, eq(trackingLogs.queueId, queue.id))
+      .leftJoin(queue, eq(trackingLogs.queueId, queue.id))
       .orderBy(desc(trackingLogs.openedAt))
-      .limit(10);
+      .limit(20);
+
+    const recentOpens = recentOpensRaw.map((op) => {
+      const isManual = op.queueId == null;
+      return {
+        ...op,
+        source: isManual ? "manual" : "auto",
+        referenceNo: op.referenceNo || (isManual ? "MANUAL" : "—"),
+        markName: op.markName || (isManual ? "Manual Send" : "—"),
+        email: op.email || "",
+        serialNo: op.serialNo || "",
+      };
+    });
 
     return NextResponse.json({
       success: true,
