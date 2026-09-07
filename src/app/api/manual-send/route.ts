@@ -7,6 +7,11 @@ import { eq, and, desc } from "drizzle-orm";
 import { appendManualSentLog } from "@/app/services/googleSheets";
 import { randomUUID } from "crypto";
 import { shouldResetDailyQuota } from "@/lib/dailyQuota";
+import {
+  buildTrackingPixelHtml,
+  getAppBaseUrl,
+  injectTrackingPixel,
+} from "@/lib/trackingPixel";
 
 async function getSmtpAssignments(): Promise<Record<string, number[]>> {
   try {
@@ -202,6 +207,8 @@ export async function POST(request: NextRequest) {
     const displayFrom = fromEmail || (account as any).fromEmail || account.email;
     const displayName = fromName || account.senderName || account.email;
     const trackingId = randomUUID();
+    const pixel = buildTrackingPixelHtml(getAppBaseUrl(request), trackingId);
+    const htmlWithPixel = injectTrackingPixel(emailHtml, pixel);
 
     await transporter.sendMail({
       from: `"${displayName}" <${displayFrom}>`,
@@ -210,7 +217,7 @@ export async function POST(request: NextRequest) {
       cc: cc || undefined,
       bcc: bcc || undefined,
       subject,
-      html: emailHtml,
+      html: htmlWithPixel,
       text: text || undefined,
     });
 
