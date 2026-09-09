@@ -39,6 +39,7 @@ export async function POST(request: NextRequest) {
         results.push(res);
         if (res.success) successCount++;
         else failCount++;
+        await new Promise((r) => setTimeout(r, 1200));
       }
       return NextResponse.json({
         success: true,

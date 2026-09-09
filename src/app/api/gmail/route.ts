@@ -125,6 +125,16 @@ export async function GET(request: NextRequest) {
     const now = new Date();
     for (let i = 0; i < list.length; i++) {
       const acc = list[i];
+      const coolDone = !acc.cooldownUntil || new Date(acc.cooldownUntil) <= now;
+      if ((acc.status === "disabled" || acc.status === "cooldown") && coolDone) {
+        try {
+          await db
+            .update(gmailAccounts)
+            .set({ status: "enabled", cooldownUntil: null })
+            .where(eq(gmailAccounts.id, acc.id));
+          list[i] = { ...list[i], status: "enabled", cooldownUntil: null };
+        } catch { /* ignore */ }
+      }
       if (shouldResetDailyQuota(acc.lastUsedAt, now) && (acc.sentToday || 0) > 0) {
         try {
           await db

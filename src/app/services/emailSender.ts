@@ -1,4 +1,3 @@
-import nodemailer from "nodemailer";
 import fs from "fs";
 import { db } from "@/db";
 import { gmailAccounts, queue, templates, campaigns } from "@/db/schema";
@@ -9,7 +8,7 @@ import {
   buildTrackingPixelHtml,
   injectTrackingPixel,
 } from "@/lib/trackingPixel";
-import { smtpFromAddress, smtpLoginUser } from "@/lib/smtpAccount";
+import { smtpFromAddress, createSmtpTransport } from "@/lib/smtpAccount";
 
 export interface SendResult {
   success: boolean;
@@ -40,34 +39,27 @@ function classifyError(errorMessage: string): {
 } {
   const msg = (errorMessage || "").toLowerCase();
 
-  // Auth errors
-  if (
-    msg.includes("invalid login") ||
-    msg.includes("authentication failed") ||
-    msg.includes("username and password not accepted") ||
-    msg.includes("badcredentials") ||
-    msg.includes("535") ||
-    msg.includes("534")
-  ) {
-    return {
-      type: "auth",
-      shouldDisableAccount: true,
-      retryable: false,
-      isDailyLimit: false,
-    };
-  }
-
-  // Rate limit / quota / daily sending limit (check BEFORE generic 550)
+  // Transient / policy / connection — NEVER disable the SMTP id
   if (
     msg.includes("daily user sending limit") ||
     msg.includes("daily sending limit") ||
     msg.includes("5.4.5") ||
     msg.includes("rate limit") ||
     msg.includes("too many") ||
+    msg.includes("throttl") ||
+    msg.includes("try again") ||
     msg.includes("quota") ||
     msg.includes("421") ||
     msg.includes("450") ||
-    msg.includes("452")
+    msg.includes("452") ||
+    msg.includes("timeout") ||
+    msg.includes("timed out") ||
+    msg.includes("etimedout") ||
+    msg.includes("econnreset") ||
+    msg.includes("econnrefused") ||
+    msg.includes("socket") ||
+    msg.includes("greeting") ||
+    msg.includes("connection")
   ) {
     const isDaily =
       msg.includes("daily") ||
@@ -78,6 +70,23 @@ function classifyError(errorMessage: string): {
       shouldDisableAccount: false,
       retryable: true,
       isDailyLimit: isDaily,
+    };
+  }
+
+  // Auth-looking errors (535 etc) are often temporary on Brevo — cooldown only
+  if (
+    msg.includes("invalid login") ||
+    msg.includes("authentication failed") ||
+    msg.includes("username and password not accepted") ||
+    msg.includes("badcredentials") ||
+    msg.includes("535") ||
+    msg.includes("534")
+  ) {
+    return {
+      type: "auth",
+      shouldDisableAccount: false,
+      retryable: true,
+      isDailyLimit: false,
     };
   }
 
@@ -149,11 +158,8 @@ export async function processNextQueueItem(
 
   const item = pendingItems[0];
 
-  // 2. Load accounts
-  const accounts = await db
-    .select()
-    .from(gmailAccounts)
-    .where(eq(gmailAccounts.status, "enabled"));
+  // 2. Load accounts (include disabled so we can auto-revive after cooldown)
+  const accounts = await db.select().from(gmailAccounts);
 
   // 3. Daily + Minute reset (calendar day + rolling minute)
   for (const acc of accounts) {
@@ -185,10 +191,18 @@ export async function processNextQueueItem(
       needsUpdate = true;
     }
 
-    // Clear expired cooldown
+    // Clear expired cooldown and auto-revive disabled ids
     if (acc.cooldownUntil && acc.cooldownUntil <= now) {
       updates.cooldownUntil = null;
       needsUpdate = true;
+    }
+    if (acc.status === "disabled" || acc.status === "cooldown") {
+      const coolDone = !acc.cooldownUntil || acc.cooldownUntil <= now;
+      if (coolDone) {
+        updates.status = "enabled";
+        needsUpdate = true;
+        acc.status = "enabled";
+      }
     }
 
     if (needsUpdate) {
@@ -206,6 +220,7 @@ export async function processNextQueueItem(
 
   // 4. Healthy accounts filter
   const healthyAccounts = accounts.filter((acc) => {
+    if (acc.status && acc.status !== "enabled") return false;
     if (acc.cooldownUntil && acc.cooldownUntil > now) return false;
     if ((acc.sentToday || 0) >= acc.dailyLimit) return false;
     if ((acc.sentThisMinute || 0) >= acc.minuteLimit) return false;
@@ -381,21 +396,7 @@ export async function processNextQueueItem(
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        const transporter = nodemailer.createTransport({
-          host: account.smtpHost,
-          port: Number(account.smtpPort),
-          secure: Boolean(account.secure),
-          auth: {
-            user: smtpLoginUser(account),
-            pass: account.appPassword,
-          },
-          connectionTimeout: 15000,
-          greetingTimeout: 15000,
-          socketTimeout: 15000,
-          tls: { rejectUnauthorized: false },
-        });
-
-        await transporter.verify();
+        const transporter = createSmtpTransport(account);
 
         await transporter.sendMail({
           from: `"${account.senderName}" <${smtpFromAddress(account)}>`,
@@ -426,50 +427,39 @@ export async function processNextQueueItem(
         lastClassified = classified;
 
         const newErrCount = (account.errorCount || 0) + 1;
+        account.errorCount = newErrCount;
         const cooldownTime = new Date();
 
-        if (classified.type === "auth") {
-          cooldownTime.setMinutes(cooldownTime.getMinutes() + 60);
-        } else if (classified.isDailyLimit) {
-          // Gmail daily limit → long cooldown (18 hours)
+        if (classified.isDailyLimit) {
           cooldownTime.setHours(cooldownTime.getHours() + 18);
-          // Also mark sentToday to limit so it stays filtered until reset
-          await db
-            .update(gmailAccounts)
-            .set({
-              errorCount: newErrCount,
-              status:
-                classified.shouldDisableAccount || newErrCount >= 8
-                  ? "disabled"
-                  : "enabled",
-              cooldownUntil: cooldownTime,
-              lastUsedAt: new Date(),
-              sentToday: account.dailyLimit || 500,
-            })
-            .where(eq(gmailAccounts.id, account.id));
         } else if (classified.type === "rate_limit") {
-          cooldownTime.setMinutes(cooldownTime.getMinutes() + 15);
+          cooldownTime.setMinutes(cooldownTime.getMinutes() + 2);
+        } else if (classified.type === "auth") {
+          cooldownTime.setMinutes(cooldownTime.getMinutes() + 3);
         } else {
-          cooldownTime.setSeconds(cooldownTime.getSeconds() + 30);
+          cooldownTime.setSeconds(cooldownTime.getSeconds() + 20);
         }
 
-        if (!classified.isDailyLimit) {
-          await db
-            .update(gmailAccounts)
-            .set({
-              errorCount: newErrCount,
-              status:
-                classified.shouldDisableAccount || newErrCount >= 8
-                  ? "disabled"
-                  : "enabled",
-              cooldownUntil: cooldownTime,
-              lastUsedAt: new Date(),
-            })
-            .where(eq(gmailAccounts.id, account.id));
+        const accUpdate: any = {
+          errorCount: newErrCount,
+          status: "enabled",
+          cooldownUntil: cooldownTime,
+          lastUsedAt: new Date(),
+        };
+        if (classified.isDailyLimit) {
+          accUpdate.sentToday = account.dailyLimit || 500;
         }
+        await db
+          .update(gmailAccounts)
+          .set(accUpdate)
+          .where(eq(gmailAccounts.id, account.id));
 
-        // Auth or permanent → leave this account immediately
-        if (classified.type === "permanent" || classified.type === "auth") {
+        // Permanent recipient errors: stop this SMTP; auth/rate: leave account this round
+        if (classified.type === "permanent") {
+          accountGaveUp = true;
+          break;
+        }
+        if (classified.type === "auth" || classified.type === "rate_limit") {
           accountGaveUp = true;
           break;
         }

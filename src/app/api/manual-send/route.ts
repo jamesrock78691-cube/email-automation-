@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { quillToEmailHtml } from "@/lib/quillToEmailHtml";
-import nodemailer from "nodemailer";
 import { db } from "@/db";
 import { gmailAccounts, settings } from "@/db/schema";
 import { eq, and, desc } from "drizzle-orm";
@@ -12,7 +11,7 @@ import {
   getAppBaseUrl,
   injectTrackingPixel,
 } from "@/lib/trackingPixel";
-import { smtpFromAddress, smtpLoginUser } from "@/lib/smtpAccount";
+import { smtpFromAddress, createSmtpTransport } from "@/lib/smtpAccount";
 
 async function getSmtpAssignments(): Promise<Record<string, number[]>> {
   try {
@@ -192,18 +191,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const transporter = nodemailer.createTransport({
-      host: account.smtpHost,
-      port: Number(account.smtpPort),
-      secure: Boolean(account.secure),
-      auth: {
-        user: smtpLoginUser(account),
-        pass: account.appPassword,
-      },
-      tls: { rejectUnauthorized: false },
-    });
-
-    await transporter.verify();
+    const transporter = createSmtpTransport(account);
 
     const displayFrom = fromEmail || smtpFromAddress(account);
     const displayName = fromName || account.senderName || account.email;
