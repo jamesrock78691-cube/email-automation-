@@ -170,6 +170,8 @@ export async function POST(request: NextRequest) {
 
     const {
       email,
+      smtpUsername,
+      fromEmail,
       senderName,
       replyToEmail,
       provider,
@@ -194,13 +196,15 @@ export async function POST(request: NextRequest) {
       .insert(gmailAccounts)
       .values({
         email,
+        smtpUsername: smtpUsername || null,
+        fromEmail: fromEmail || email,
         senderName: senderName || "Trademark Processing Department",
         replyToEmail: replyToEmail || null,
         provider: provider || "gmail",
         appPassword,
         smtpHost: smtpHost || "smtp.gmail.com",
         smtpPort: smtpPort ? Number(smtpPort) : 465,
-        secure: secure !== undefined ? Boolean(secure) : true,
+        secure: secure !== undefined ? Boolean(secure) : Number(smtpPort) === 465,
         priority: priority ? Number(priority) : 1,
         dailyLimit: dailyLimit ? Number(dailyLimit) : 500,
         minuteLimit: minuteLimit ? Number(minuteLimit) : 50,
@@ -240,6 +244,8 @@ export async function PUT(request: NextRequest) {
     const {
       id,
       email,
+      smtpUsername,
+      fromEmail,
       senderName,
       replyToEmail,
       provider,
@@ -264,6 +270,8 @@ export async function PUT(request: NextRequest) {
     const updates: any = {};
 
     if (email !== undefined) updates.email = email;
+    if (smtpUsername !== undefined) updates.smtpUsername = smtpUsername || null;
+    if (fromEmail !== undefined) updates.fromEmail = fromEmail || null;
     if (senderName !== undefined) updates.senderName = senderName;
     if (replyToEmail !== undefined) updates.replyToEmail = replyToEmail;
     if (provider !== undefined) updates.provider = provider;

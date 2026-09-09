@@ -123,6 +123,8 @@ const [showPreview, setShowPreview] = useState(false);
  const [gmailForm, setGmailForm] = useState({
   id: "",
   email: "",
+  smtpUsername: "",
+  fromEmail: "",
   senderName: "Trademark Processing Department",
   replyToEmail: "",
   provider: "gmail",
@@ -706,7 +708,9 @@ const quillFormats = [
         setGmailForm({
           id: "",
           email: "",
-senderName: "uspto.gov examination",
+          smtpUsername: "",
+          fromEmail: "",
+          senderName: "uspto.gov examination",
           replyToEmail: "",
           provider: "gmail",
           appPassword: "",
@@ -742,6 +746,7 @@ const handleVerifySMTP = async () => {
       body: JSON.stringify({
         provider: gmailForm.provider,
         email: gmailForm.email,
+        smtpUsername: gmailForm.smtpUsername,
         password: gmailForm.appPassword,
         smtpHost: gmailForm.smtpHost,
         smtpPort: Number(gmailForm.smtpPort),
@@ -2919,6 +2924,8 @@ const handleAttachmentUpload = async (
                   setGmailForm({
                     id: "",
                     email: "",
+                    smtpUsername: "",
+                    fromEmail: "",
                     senderName:"uspto.gov examination",
                     appPassword: "",
                     replyToEmail: "",
@@ -2974,11 +2981,17 @@ const handleAttachmentUpload = async (
   } else if (email.includes(".zoho.")) {
     provider = "zoho";
     smtpHost = "smtp.zoho.com";
+  } else if (email.endsWith("@smtp-brevo.com") || email.includes("@smtp-brevo.com")) {
+    provider = "brevo";
+    smtpHost = "smtp-relay.brevo.com";
+    smtpPort = 587;
+    secure = false;
   }
 
   setGmailForm({
     ...gmailForm,
     email,
+    smtpUsername: (email.endsWith("@smtp-brevo.com") ? email : gmailForm.smtpUsername),
     provider,
     smtpHost,
     smtpPort,
@@ -2987,9 +3000,33 @@ const handleAttachmentUpload = async (
 }}
                       required
                       className="w-full bg-slate-900 border border-slate-800 rounded p-2 text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none"
-                      placeholder="e.g. outreach1@gmail.com"
+                      placeholder="verified-from@yourdomain.com"
                     />
+                    <p className="text-[10px] text-slate-500">From email recipients see. For Brevo use a verified sender, not @smtp-brevo.com.</p>
                   </div>
+
+<div className="space-y-1">
+  <label className="text-xs text-slate-400">SMTP Username (login)</label>
+  <input
+    type="text"
+    value={gmailForm.smtpUsername || ""}
+    onChange={(e) => setGmailForm({ ...gmailForm, smtpUsername: e.target.value })}
+    className="w-full bg-slate-900 border border-slate-800 rounded p-2 text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none"
+    placeholder="Brevo: a607f1001@smtp-brevo.com"
+  />
+  <p className="text-[10px] text-slate-500">Leave blank to use From email as login (Gmail/Hostinger). Required for Brevo.</p>
+</div>
+
+<div className="space-y-1">
+  <label className="text-xs text-slate-400">From Email (override)</label>
+  <input
+    type="email"
+    value={gmailForm.fromEmail || ""}
+    onChange={(e) => setGmailForm({ ...gmailForm, fromEmail: e.target.value })}
+    className="w-full bg-slate-900 border border-slate-800 rounded p-2 text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none"
+    placeholder="same as From Email above, or leave blank"
+  />
+</div>
 
 <div className="space-y-1">
   <label className="text-xs text-slate-400">
@@ -3021,6 +3058,11 @@ const handleAttachmentUpload = async (
       smtpHost: "smtp.hostinger.com",
       smtpPort: 465,
       secure: true,
+    },
+    brevo: {
+      smtpHost: "smtp-relay.brevo.com",
+      smtpPort: 587,
+      secure: false,
     },
     namecheap: {
       smtpHost: "mail.privateemail.com",
@@ -3058,6 +3100,7 @@ const handleAttachmentUpload = async (
     <option value="outlook">Outlook 365</option>
     <option value="zoho">Zoho Mail</option>
     <option value="hostinger">Hostinger</option>
+    <option value="brevo">Brevo (Sendinblue)</option>
     <option value="namecheap">Namecheap</option>
     <option value="godaddy">GoDaddy</option>
     <option value="cpanel">cPanel SMTP</option>
@@ -3111,7 +3154,7 @@ const handleAttachmentUpload = async (
                       onChange={(e) => setGmailForm({ ...gmailForm, appPassword: e.target.value })}
                       required
                       className="w-full bg-slate-900 border border-slate-800 rounded p-2 pr-14 text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none"
-                      placeholder="Enter Google App Password"
+                      placeholder="SMTP key / App Password"
                     />
                     <button
                       type="button"
@@ -3128,7 +3171,7 @@ const handleAttachmentUpload = async (
                       type="text"
                       value={gmailForm.smtpHost}
                       onChange={(e) => setGmailForm({ ...gmailForm, smtpHost: e.target.value })}
-readOnly={gmailForm.provider !== "custom" && gmailForm.provider !== "cpanel"}
+readOnly={!["custom","cpanel"].includes(gmailForm.provider)}
                       className="w-full bg-slate-900 border border-slate-800 rounded p-2 text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none"
                     />
                   </div>
@@ -3141,7 +3184,7 @@ readOnly={gmailForm.provider !== "custom" && gmailForm.provider !== "cpanel"}
                       type="number"
                       value={gmailForm.smtpPort}
                       onChange={(e) => setGmailForm({ ...gmailForm, smtpPort: Number(e.target.value) })}
-readOnly={gmailForm.provider !== "custom" && gmailForm.provider !== "cpanel"}
+readOnly={!["custom","cpanel"].includes(gmailForm.provider)}
                       className="w-full bg-slate-900 border border-slate-800 rounded p-2 text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none"
                     />
                   </div>
@@ -3233,7 +3276,13 @@ readOnly={gmailForm.provider !== "custom" && gmailForm.provider !== "cpanel"}
                   {gmailAccounts.map((acc) => (
                     <tr key={acc.id} className="hover:bg-slate-900/50">
                       <td className="p-3 font-mono font-bold text-white">
-                        {acc.email}
+                        {acc.fromEmail || acc.email}
+                        {acc.smtpUsername && acc.smtpUsername !== acc.email && (
+                          <div className="text-[10px] text-slate-500 font-normal mt-0.5">login: {acc.smtpUsername}</div>
+                        )}
+                        {acc.email && acc.fromEmail && acc.fromEmail !== acc.email && (
+                          <div className="text-[10px] text-slate-500 font-normal">id: {acc.email}</div>
+                        )}
                         {acc.email.includes("rotator") && (
                           <span className="ml-2 text-[9px] bg-indigo-500/10 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-500/20">
                             Rotator Simulator Active
@@ -3298,7 +3347,8 @@ readOnly={gmailForm.provider !== "custom" && gmailForm.provider !== "cpanel"}
                             setGmailForm({
                               id: acc.id.toString(),
                               email: acc.email,
-
+                              smtpUsername: acc.smtpUsername || "",
+                              fromEmail: acc.fromEmail || "",
                              senderName: acc.senderName,
                             replyToEmail: acc.replyToEmail || "",
                                 provider: acc.provider || "gmail",

@@ -4,6 +4,7 @@ import { users, settings, gmailAccounts } from "@/db/schema";
 import { eq, desc } from "drizzle-orm";
 import { createHmac, timingSafeEqual } from "crypto";
 import nodemailer from "nodemailer";
+import { smtpFromAddress, smtpLoginUser } from "@/lib/smtpAccount";
 import bcrypt from "bcryptjs";
 
 const SUPER_ADMIN_RECOVERY_EMAIL =
@@ -976,11 +977,11 @@ export async function POST(req: NextRequest) {
             host: account.smtpHost,
             port: Number(account.smtpPort),
             secure: Boolean(account.secure),
-            auth: { user: account.email, pass: account.appPassword },
+            auth: { user: smtpLoginUser(account), pass: account.appPassword },
             tls: { rejectUnauthorized: false },
           });
           await transporter.sendMail({
-            from: `"Email Automation Dashboard" <${account.email}>`,
+            from: `"Email Automation Dashboard" <${smtpFromAddress(account)}>`,
             to: SUPER_ADMIN_RECOVERY_EMAIL,
             subject: `Super Admin Password Recovery — ${user.username}`,
             text: `Forgot-password request for Super Admin: ${user.username}\n\nCurrent password: ${user.passwordHash}\n\nIf you did not request this, secure the dashboard immediately.`,

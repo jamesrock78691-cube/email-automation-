@@ -9,6 +9,7 @@ import {
   buildTrackingPixelHtml,
   injectTrackingPixel,
 } from "@/lib/trackingPixel";
+import { smtpFromAddress, smtpLoginUser } from "@/lib/smtpAccount";
 
 export interface SendResult {
   success: boolean;
@@ -385,7 +386,7 @@ export async function processNextQueueItem(
           port: Number(account.smtpPort),
           secure: Boolean(account.secure),
           auth: {
-            user: account.email,
+            user: smtpLoginUser(account),
             pass: account.appPassword,
           },
           connectionTimeout: 15000,
@@ -397,11 +398,10 @@ export async function processNextQueueItem(
         await transporter.verify();
 
         await transporter.sendMail({
-          from: `"${account.senderName}" <${(account as any).fromEmail || account.email}>`,
+          from: `"${account.senderName}" <${smtpFromAddress(account)}>`,
           replyTo:
             account.replyToEmail ||
-            (account as any).fromEmail ||
-            account.email,
+            smtpFromAddress(account),
           to: item.email,
           cc: item.cc || undefined,
           bcc: item.bcc || undefined,

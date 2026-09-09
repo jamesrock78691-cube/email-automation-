@@ -6,17 +6,20 @@ export async function POST(request: NextRequest) {
     const {
       provider,
       email,
+      smtpUsername,
       password,
       smtpHost,
       smtpPort,
       secure,
     } = await request.json();
 
-    if (!email || !password) {
+    const loginUser = String(smtpUsername || email || "").trim();
+
+    if (!loginUser || !password) {
       return NextResponse.json(
         {
           success: false,
-          error: "Email and password are required.",
+          error: "SMTP username/email and password are required.",
         },
         { status: 400 }
       );
@@ -47,8 +50,13 @@ export async function POST(request: NextRequest) {
 
       case "hostinger":
         host = "smtp.hostinger.com";
-        // We'll respect whatever port the user entered.
         port = Number(smtpPort);
+        isSecure = port === 465;
+        break;
+
+      case "brevo":
+        host = "smtp-relay.brevo.com";
+        port = Number(smtpPort) || 587;
         isSecure = port === 465;
         break;
 
@@ -73,7 +81,7 @@ export async function POST(request: NextRequest) {
       secure: isSecure,
 
       auth: {
-        user: email.trim(),
+        user: loginUser,
         pass: password.trim(),
       },
 

@@ -22,3 +22,13 @@ if (process.env.NODE_ENV !== "production") {
 }
 
 export const db = drizzle(pool);
+
+async function ensureSmtpColumns() {
+  try {
+    await pool.query(`ALTER TABLE gmail_accounts ADD COLUMN IF NOT EXISTS smtp_username text`);
+    await pool.query(`ALTER TABLE gmail_accounts ADD COLUMN IF NOT EXISTS from_email text`);
+  } catch (err) {
+    console.error("ensureSmtpColumns:", err);
+  }
+}
+void ensureSmtpColumns();

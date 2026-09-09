@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { gmailAccounts } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import nodemailer from "nodemailer";
+import { smtpLoginUser } from "@/lib/smtpAccount";
 
 export async function POST(request: NextRequest) {
   try {
@@ -58,6 +59,12 @@ switch (account.provider) {
     secure = true;
     break;
 
+  case "brevo":
+    host = "smtp-relay.brevo.com";
+    port = Number(account.smtpPort) || 587;
+    secure = port === 465;
+    break;
+
   case "namecheap":
     host = "mail.privateemail.com";
     port = 465;
@@ -82,7 +89,7 @@ switch (account.provider) {
   port,
   secure,
       auth: {
-        user: account.email,
+        user: smtpLoginUser(account),
         pass: account.appPassword,
       },
       connectionTimeout: 5000,

@@ -12,6 +12,7 @@ import {
   getAppBaseUrl,
   injectTrackingPixel,
 } from "@/lib/trackingPixel";
+import { smtpFromAddress, smtpLoginUser } from "@/lib/smtpAccount";
 
 async function getSmtpAssignments(): Promise<Record<string, number[]>> {
   try {
@@ -196,7 +197,7 @@ export async function POST(request: NextRequest) {
       port: Number(account.smtpPort),
       secure: Boolean(account.secure),
       auth: {
-        user: account.email,
+        user: smtpLoginUser(account),
         pass: account.appPassword,
       },
       tls: { rejectUnauthorized: false },
@@ -204,7 +205,7 @@ export async function POST(request: NextRequest) {
 
     await transporter.verify();
 
-    const displayFrom = fromEmail || (account as any).fromEmail || account.email;
+    const displayFrom = fromEmail || smtpFromAddress(account);
     const displayName = fromName || account.senderName || account.email;
     const trackingId = randomUUID();
     const pixel = buildTrackingPixelHtml(getAppBaseUrl(request), trackingId);

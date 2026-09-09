@@ -13,10 +13,14 @@ export const users = pgTable("users", {
 export const gmailAccounts = pgTable("gmail_accounts", {
   id: serial("id").primaryKey(),
 
-  // Login Email
+  // Login Email / account identity
   email: text("email").notNull().unique(),
 
+  // SMTP auth username (Brevo: xxx@smtp-brevo.com). Falls back to email.
+  smtpUsername: text("smtp_username"),
 
+  // Visible From address (verified sender). Falls back to email.
+  fromEmail: text("from_email"),
 
   // Sender Display Name
   senderName: text("sender_name")
