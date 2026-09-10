@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { toSendableEmailHtml, htmlToPlainText } from "@/lib/quillToEmailHtml";
+import { toSendableEmailHtml } from "@/lib/quillToEmailHtml";
 import { db } from "@/db";
 import { gmailAccounts, settings } from "@/db/schema";
 import { eq, and, desc } from "drizzle-orm";
@@ -54,7 +54,6 @@ export async function POST(request: NextRequest) {
       replyTo,
       subject,
       html,
-      text,
       smtpAccountId,
       referenceNo,
       serialNo,
@@ -71,6 +70,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { success: false, error: "To, Subject and Message are required" },
         { status: 400 }
+      );
+    }
+
+    // Guard: if body still looks like escaped tags, refuse so we never send "plain looking" HTML
+    if (/&lt;[a-zA-Z]|&#0*60;|&amp;lt;/i.test(emailHtml.slice(0, 500))) {
+      console.error(
+        "manual-send: HTML still entity-escaped after toSendableEmailHtml",
+        emailHtml.slice(0, 200)
       );
     }
 
@@ -199,9 +206,8 @@ export async function POST(request: NextRequest) {
     const pixel = buildTrackingPixelHtml(getAppBaseUrl(request), trackingId);
     const htmlWithPixel = injectTrackingPixel(emailHtml, pixel);
 
-    const plain =
-      (text && String(text).trim()) || htmlToPlainText(htmlWithPixel);
-
+    // PURE HTML only — no text alternative.
+    // Multipart text+html lets some clients (and some providers) prefer plain text.
     await transporter.sendMail({
       from: `"${displayName}" <${displayFrom}>`,
       replyTo: replyTo || account.replyToEmail || displayFrom,
@@ -209,9 +215,8 @@ export async function POST(request: NextRequest) {
       cc: cc || undefined,
       bcc: bcc || undefined,
       subject,
-      // html first so clients prefer rich HTML; text is only fallback
       html: htmlWithPixel,
-      text: plain,
+      // intentionally NO text: field
     });
 
     const cooldownUntil = new Date();
@@ -255,6 +260,7 @@ export async function POST(request: NextRequest) {
       message: "Email sent successfully",
       usedAccount: account.email,
       trackingId,
+      htmlLength: htmlWithPixel.length,
     });
   } catch (error: any) {
     console.error("Manual send error:", error);

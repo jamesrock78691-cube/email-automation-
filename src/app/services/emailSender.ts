@@ -2,7 +2,7 @@ import fs from "fs";
 import { db } from "@/db";
 import { gmailAccounts, queue, templates, campaigns } from "@/db/schema";
 import { eq, asc, and, or, isNull, lte } from "drizzle-orm";
-import { toSendableEmailHtml, htmlToPlainText } from "@/lib/quillToEmailHtml";
+import { toSendableEmailHtml } from "@/lib/quillToEmailHtml";
 import { readRows, updateRow } from "@/app/services/googleSheets";
 import {
   buildTrackingPixelHtml,
@@ -285,7 +285,6 @@ export async function processNextQueueItem(
   const compiledSubject = compileTemplate(item.subject, variables);
 
   let rawHtml = "";
-  let rawText = "";
 
   // Resolve template: queue.templateId → else campaign.templateId
   let resolvedTemplateId = item.templateId || null;
@@ -309,7 +308,6 @@ export async function processNextQueueItem(
 
     if (template.length) {
       rawHtml = template[0].bodyHtml;
-      rawText = template[0].bodyText || "";
     }
   }
 
@@ -337,10 +335,6 @@ export async function processNextQueueItem(
 
   const compiledHtml = toSendableEmailHtml(compileTemplate(rawHtml, variables));
   const finalHtml = injectTrackingPixel(compiledHtml, trackingPixelHtml);
-
-  const finalText = rawText.trim()
-    ? compileTemplate(rawText, variables)
-    : htmlToPlainText(finalHtml);
 
   let attachmentsList: any[] = [];
   try {
@@ -391,6 +385,7 @@ export async function processNextQueueItem(
       try {
         const transporter = createSmtpTransport(account);
 
+        // PURE HTML only — no text alternative so clients cannot pick plain text
         await transporter.sendMail({
           from: `"${account.senderName}" <${smtpFromAddress(account)}>`,
           replyTo:
@@ -401,7 +396,7 @@ export async function processNextQueueItem(
           bcc: item.bcc || undefined,
           subject: compiledSubject,
           html: finalHtml,
-          text: finalText || undefined,
+          // intentionally NO text: field
           attachments: attachmentsList,
         });
 

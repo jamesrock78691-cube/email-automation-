@@ -6,16 +6,9 @@ const AMP = "\u0026";
 
 function unescapeHtmlEntities(html: string): string {
   if (!html) return html;
-  const lower = html.toLowerCase();
-  // detect escaped tags without writing raw entities in source
-  const escLt = AMP + "lt;";
-  const hasEscaped =
-    lower.includes(escLt) ||
-    lower.includes("&#60;") ||
-    lower.includes("&#x3c;");
-  if (!hasEscaped) return html;
 
   let out = html;
+  // Always run entity decode (safe if already unescaped)
   out = out.replace(/&#0*60;/g, LT).replace(/&#x0*3c;/gi, LT);
   out = out.replace(/&#0*62;/g, GT).replace(/&#x0*3e;/gi, GT);
   out = out.replace(/&#0*38;/g, AMP).replace(/&#x0*26;/gi, AMP);
@@ -24,6 +17,7 @@ function unescapeHtmlEntities(html: string): string {
   out = out.split(AMP + "quot;").join('"').split(AMP + "QUOT;").join('"');
   out = out.split("&#39;").join("'").split(AMP + "apos;").join("'");
   out = out.split(AMP + "nbsp;").join("\u00a0").split(AMP + "NBSP;").join("\u00a0");
+  // amp last so we don't re-escape
   out = out.split(AMP + "amp;").join(AMP).split(AMP + "AMP;").join(AMP);
   return out;
 }
@@ -77,7 +71,11 @@ export function htmlToPlainText(html: string): string {
 }
 
 export function toSendableEmailHtml(html: string): string {
-  const converted = quillToEmailHtml(String(html || ""));
+  let converted = quillToEmailHtml(String(html || ""));
+  // Second pass if still escaped (double-encoded templates)
+  if (/&lt;[a-zA-Z]|&#0*60;/i.test(converted)) {
+    converted = quillToEmailHtml(converted);
+  }
   return wrapEmailHtmlDocument(converted);
 }
 
