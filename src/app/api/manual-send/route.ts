@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { quillToEmailHtml } from "@/lib/quillToEmailHtml";
+import { toSendableEmailHtml, htmlToPlainText } from "@/lib/quillToEmailHtml";
 import { db } from "@/db";
 import { gmailAccounts, settings } from "@/db/schema";
 import { eq, and, desc } from "drizzle-orm";
@@ -65,7 +65,7 @@ export async function POST(request: NextRequest) {
       sentByUsername,
     } = body;
 
-    const emailHtml = quillToEmailHtml(String(html || ""));
+    const emailHtml = toSendableEmailHtml(String(html || ""));
 
     if (!to || !subject || !html) {
       return NextResponse.json(
@@ -199,6 +199,9 @@ export async function POST(request: NextRequest) {
     const pixel = buildTrackingPixelHtml(getAppBaseUrl(request), trackingId);
     const htmlWithPixel = injectTrackingPixel(emailHtml, pixel);
 
+    const plain =
+      (text && String(text).trim()) || htmlToPlainText(htmlWithPixel);
+
     await transporter.sendMail({
       from: `"${displayName}" <${displayFrom}>`,
       replyTo: replyTo || account.replyToEmail || displayFrom,
@@ -206,8 +209,9 @@ export async function POST(request: NextRequest) {
       cc: cc || undefined,
       bcc: bcc || undefined,
       subject,
+      // html first so clients prefer rich HTML; text is only fallback
       html: htmlWithPixel,
-      text: text || undefined,
+      text: plain,
     });
 
     const cooldownUntil = new Date();
