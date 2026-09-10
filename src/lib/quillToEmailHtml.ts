@@ -1,29 +1,39 @@
 /**
- * Quill → email HTML. Spacing exact jaisa editor mein likha / save kiya.
- * Always produce real HTML (not escaped tags) for SMTP clients.
+ * Quill to email HTML. Always produce real renderable HTML for SMTP clients.
  */
 
-/** If content was double-encoded (<div>...), decode so clients render HTML */
+const LT = "\u003c";
+const GT = "\u003e";
+const AMP = "\u0026";
+
+/** Decode escaped markup entities when present */
 function unescapeHtmlEntities(html: string): string {
   if (!html) return html;
-  // Only decode when it looks like escaped markup (otherwise leave normal text)
-  if (!/<\s*\/?\s*[a-z][a-z0-9]*\b/i.test(html)) return html;
-  return html
-    .replace(/</gi, "<")
-    .replace(/>/gi, ">")
-    .replace(/"/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/'/gi, "'")
-    .replace(/&nbsp;/gi, "\u00a0")
-    .replace(/&/gi, "&");
+  const lower = html.toLowerCase();
+  const hasEscaped =
+    lower.includes("<") ||
+    lower.includes("&#60;") ||
+    lower.includes("&#x3c;");
+  if (!hasEscaped) return html;
+
+  let out = html;
+  out = out.replace(/&#0*60;/g, LT).replace(/&#x0*3c;/gi, LT);
+  out = out.replace(/&#0*62;/g, GT).replace(/&#x0*3e;/gi, GT);
+  out = out.replace(/&#0*38;/g, AMP).replace(/&#x0*26;/gi, AMP);
+  out = out.split("<").join(LT).split("&LT;").join(LT);
+  out = out.split(">").join(GT).split("&GT;").join(GT);
+  out = out.split(""").join('"').split("&QUOT;").join('"');
+  out = out.split("&#39;").join("'").split("'").join("'");
+  out = out.split("&nbsp;").join("\u00a0").split("&NBSP;").join("\u00a0");
+  out = out.split("&").join(AMP).split("&AMP;").join(AMP);
+  return out;
 }
 
-/** Full HTML document — many inbox clients need this to show rich HTML */
+/** Full HTML document for inbox clients */
 export function wrapEmailHtmlDocument(bodyHtml: string): string {
   const body = String(bodyHtml || "").trim();
   if (!body) return "";
   if (/<html[\s>]/i.test(body)) {
-    // Ensure charset meta exists
     if (!/charset\s*=/i.test(body)) {
       return body.replace(
         /<head([^>]*)>/i,
@@ -34,20 +44,20 @@ export function wrapEmailHtmlDocument(bodyHtml: string): string {
   }
   return (
     "<!DOCTYPE html>\n" +
-    '<html lang="en">\n' +
+    '<html xmlns="http://www.w3.org/1999/xhtml" lang="en">\n' +
     "<head>\n" +
     '<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />\n' +
     '<meta charset="UTF-8" />\n' +
     '<meta name="viewport" content="width=device-width, initial-scale=1.0" />\n' +
-    "<title></title>\n" +
+    "<title>Email</title>\n" +
     "</head>\n" +
-    '<body style="margin:0;padding:0;background-color:#ffffff;-webkit-text-size-adjust:100%;">\n' +
+    '<body style="margin:0;padding:12px;background-color:#ffffff;-webkit-text-size-adjust:100%;">\n' +
     body +
     "\n</body>\n</html>"
   );
 }
 
-/** Strip tags for multipart text/plain alternative */
+/** Plain-text alternative for multipart */
 export function htmlToPlainText(html: string): string {
   return String(html || "")
     .replace(/<style[\s\S]*?<\/style>/gi, "")
@@ -56,6 +66,7 @@ export function htmlToPlainText(html: string): string {
     .replace(/<\/p>/gi, "\n\n")
     .replace(/<\/div>/gi, "\n")
     .replace(/<\/tr>/gi, "\n")
+    .replace(/<\/h[1-6]>/gi, "\n\n")
     .replace(/<[^>]+>/g, " ")
     .replace(/&nbsp;/gi, " ")
     .replace(/&/gi, "&")
@@ -68,9 +79,7 @@ export function htmlToPlainText(html: string): string {
     .trim();
 }
 
-/**
- * Final payload for nodemailer `html` field — always valid renderable HTML email.
- */
+/** Final nodemailer html payload */
 export function toSendableEmailHtml(html: string): string {
   const converted = quillToEmailHtml(String(html || ""));
   return wrapEmailHtmlDocument(converted);
@@ -81,17 +90,13 @@ export function quillToEmailHtml(html: string): string {
 
   let result = unescapeHtmlEntities(html);
 
-  // Already converted fragment — still OK to return (wrapper adds document)
   if (result.includes('data-ea-converted="1"')) {
     return result;
   }
 
-  // If full document was pasted, work on body only then re-wrap later
   if (/<html[\s>]/i.test(result) || /<!DOCTYPE/i.test(result)) {
     const bodyMatch = result.match(/<body[^>]*>([\s\S]*)<\/body>/i);
-    if (bodyMatch) {
-      result = bodyMatch[1];
-    }
+    if (bodyMatch) result = bodyMatch[1];
   }
 
   const applyAlign = (align: string) => {
@@ -206,13 +211,11 @@ function normalizeEmailSpacing(html: string): string {
 
   let result = html;
 
-  // Empty line = sirf ek normal line break, extra gap nahi
   result = result.replace(
     /<p([^>]*)>\s*(?:<br\s*\/?>|&nbsp;|\s)*\s*<\/p>/gi,
     '<p$1 style="margin:0;padding:0;line-height:1.5;"><br></p>'
   );
 
-  // Normal paragraphs — zero extra margin (jaisa type kiya)
   const blocks = ["p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li"];
   for (const tag of blocks) {
     const re = new RegExp(`<${tag}(\\s[^>]*)?>`, "gi");
