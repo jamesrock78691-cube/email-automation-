@@ -15,11 +15,16 @@ const TRANSPARENT_PNG = Buffer.from(
 
 function pixelResponse() {
   return new NextResponse(TRANSPARENT_PNG, {
+    status: 200,
     headers: {
       "Content-Type": "image/png",
+      "Content-Length": String(TRANSPARENT_PNG.length),
       "Cache-Control": "no-store, no-cache, must-revalidate, private, max-age=0",
       Pragma: "no-cache",
       Expires: "0",
+      // Allow embedding from any mail client / proxy
+      "Access-Control-Allow-Origin": "*",
+      "X-Content-Type-Options": "nosniff",
     },
   });
 }
@@ -27,22 +32,23 @@ function pixelResponse() {
 function parseClient(request: NextRequest) {
   const userAgent = request.headers.get("user-agent") || "Unknown Browser";
   const ipAddress =
-    request.headers.get("x-forwarded-for") ||
+    (request.headers.get("x-forwarded-for") || "")
+      .split(",")[0]
+      .trim() ||
     request.headers.get("x-real-ip") ||
     "127.0.0.1";
 
   let browser = "Other";
   if (userAgent.includes("Firefox")) browser = "Firefox";
+  else if (userAgent.includes("Edg")) browser = "Edge";
   else if (userAgent.includes("Chrome")) browser = "Chrome";
   else if (userAgent.includes("Safari")) browser = "Safari";
-  else if (userAgent.includes("Edge")) browser = "Edge";
-  else if (userAgent.includes("MSIE")) browser = "Internet Explorer";
+  else if (userAgent.includes("MSIE") || userAgent.includes("Trident"))
+    browser = "Internet Explorer";
 
   let device = "Desktop";
   if (
-    userAgent.includes("Mobile") ||
-    userAgent.includes("Android") ||
-    userAgent.includes("iPhone")
+    /Mobile|Android|iPhone|iPad|iPod/i.test(userAgent)
   ) {
     device = "Mobile";
   }
@@ -54,8 +60,18 @@ export async function GET(
   request: NextRequest,
   context: { params: Promise<{ trackingId: string }> }
 ) {
+  // Always return the pixel — even if logging fails
   try {
-    const { trackingId } = await context.params;
+    const raw = (await context.params)?.trackingId || "";
+    let trackingId = String(raw).trim();
+    try {
+      trackingId = decodeURIComponent(trackingId);
+    } catch {
+      // keep raw
+    }
+    // strip optional query junk if somehow in path
+    trackingId = trackingId.split("?")[0].split("&")[0].trim();
+
     if (!trackingId) return pixelResponse();
 
     const matchedQueue = await db
@@ -74,7 +90,7 @@ export async function GET(
       await db
         .update(queue)
         .set({
-          openCount: qItem.openCount + 1,
+          openCount: (qItem.openCount || 0) + 1,
           lastOpenedAt: openedAt,
         })
         .where(eq(queue.id, qItem.id));
@@ -92,12 +108,11 @@ export async function GET(
         referenceNo: qItem.referenceNo || null,
       });
 
-      // Auto sheet Open Count / Opened At
       recordOpenOnAutoSheet(trackingId, openedAtIso).catch((err) =>
         console.error("auto sheet open update failed:", err)
       );
     } else {
-      // Manual-send: update Google Sheet first so we can store email on the log
+      // Manual-send path (no queue row)
       let manualEmail: string | null = null;
       let manualMark: string | null = null;
       let manualRef: string | null = null;
@@ -128,11 +143,19 @@ export async function GET(
     }
 
     console.log(
-      `[TRACKING PIXEL] Logged email open for trackId: ${trackingId}, IP: ${ipAddress}`
+      `[TRACKING PIXEL] Logged open trackId=${trackingId} ip=${ipAddress}`
     );
   } catch (error) {
     console.error("Error in open tracking route:", error);
   }
 
   return pixelResponse();
+}
+
+// HEAD support (some clients probe)
+export async function HEAD(
+  request: NextRequest,
+  context: { params: Promise<{ trackingId: string }> }
+) {
+  return GET(request, context);
 }
