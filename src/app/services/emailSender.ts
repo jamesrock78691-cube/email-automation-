@@ -2,7 +2,7 @@ import fs from "fs";
 import { db } from "@/db";
 import { gmailAccounts, queue, templates, campaigns } from "@/db/schema";
 import { eq, asc, and, or, isNull, lte } from "drizzle-orm";
-import { quillToEmailHtml } from "@/lib/quillToEmailHtml";
+import { toSendableEmailHtml, htmlToPlainText } from "@/lib/quillToEmailHtml";
 import { readRows, updateRow } from "@/app/services/googleSheets";
 import {
   buildTrackingPixelHtml,
@@ -335,19 +335,12 @@ export async function processNextQueueItem(
     };
   }
 
-  const compiledHtml = quillToEmailHtml(compileTemplate(rawHtml, variables));
+  const compiledHtml = toSendableEmailHtml(compileTemplate(rawHtml, variables));
   const finalHtml = injectTrackingPixel(compiledHtml, trackingPixelHtml);
 
   const finalText = rawText.trim()
     ? compileTemplate(rawText, variables)
-    : compiledHtml
-        .replace(/<style[\s\S]*?<\/style>/gi, "")
-        .replace(/<script[\s\S]*?<\/script>/gi, "")
-        .replace(/<[^>]+>/g, " ")
-        .replace(/&nbsp;/g, " ")
-        .replace(/&amp;/g, "&")
-        .replace(/\s+/g, " ")
-        .trim();
+    : htmlToPlainText(finalHtml);
 
   let attachmentsList: any[] = [];
   try {
