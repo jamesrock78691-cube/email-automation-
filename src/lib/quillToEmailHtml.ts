@@ -16,15 +16,73 @@ function unescapeHtmlEntities(html: string): string {
   out = out.split(AMP + "gt;").join(GT).split(AMP + "GT;").join(GT);
   out = out.split(AMP + "quot;").join('"').split(AMP + "QUOT;").join('"');
   out = out.split("&#39;").join("'").split(AMP + "apos;").join("'");
-  out = out.split(AMP + "nbsp;").join("\u00a0").split(AMP + "NBSP;").join("\u00a0");
+  out = out
+    .split(AMP + "nbsp;")
+    .join("\u00a0")
+    .split(AMP + "NBSP;")
+    .join("\u00a0");
   // amp last so we don't re-escape
   out = out.split(AMP + "amp;").join(AMP).split(AMP + "AMP;").join(AMP);
   return out;
 }
 
+/**
+ * If the stored template already contains a full HTML document
+ * (often nested inside a data-ea-converted div from a previous save),
+ * extract ONE clean document. Nested <!DOCTYPE>/<html> breaks Gmail
+ * and many clients into plain-text fallback.
+ */
+function extractCleanFullDocument(html: string): string | null {
+  const raw = String(html || "").trim();
+  if (!raw) return null;
+
+  // Prefer the last (innermost) complete document if nested
+  const doctypeIdx = raw.toLowerCase().lastIndexOf("<!doctype");
+  const htmlTagIdx = raw.toLowerCase().lastIndexOf("<html");
+  const start =
+    doctypeIdx >= 0
+      ? doctypeIdx
+      : htmlTagIdx >= 0
+        ? htmlTagIdx
+        : -1;
+  if (start < 0) return null;
+
+  let doc = raw.slice(start);
+
+  // Trim anything after the final </html>
+  const closeHtml = doc.toLowerCase().lastIndexOf("</html>");
+  if (closeHtml >= 0) {
+    doc = doc.slice(0, closeHtml + 7);
+  }
+
+  // Ensure charset meta exists
+  if (!/charset\s*=/i.test(doc)) {
+    if (/<head[^>]*>/i.test(doc)) {
+      doc = doc.replace(
+        /<head([^>]*)>/i,
+        '<head$1>\n<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />\n<meta charset="UTF-8" />'
+      );
+    } else if (/<html[^>]*>/i.test(doc)) {
+      doc = doc.replace(
+        /<html([^>]*)>/i,
+        '<html$1>\n<head>\n<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />\n<meta charset="UTF-8" />\n</head>'
+      );
+    }
+  }
+
+  // Must still look like a document
+  if (!/<html[\s>]/i.test(doc) && !/<!DOCTYPE/i.test(doc)) return null;
+  return doc.trim();
+}
+
 export function wrapEmailHtmlDocument(bodyHtml: string): string {
   const body = String(bodyHtml || "").trim();
   if (!body) return "";
+
+  // Already a full document?
+  const existing = extractCleanFullDocument(body);
+  if (existing) return existing;
+
   if (/<html[\s>]/i.test(body)) {
     if (!/charset\s*=/i.test(body)) {
       return body.replace(
@@ -34,6 +92,7 @@ export function wrapEmailHtmlDocument(bodyHtml: string): string {
     }
     return body;
   }
+
   return (
     "<!DOCTYPE html>\n" +
     '<html xmlns="http://www.w3.org/1999/xhtml" lang="en">\n' +
@@ -70,22 +129,55 @@ export function htmlToPlainText(html: string): string {
     .trim();
 }
 
+/**
+ * Main entry for outbound emails.
+ * Handles 3 cases:
+ *  1. Full HTML document (even if wrapped in data-ea-converted) → extract clean doc
+ *  2. Quill fragment with classes → convert + wrap
+ *  3. Already-converted fragment → wrap only
+ */
 export function toSendableEmailHtml(html: string): string {
-  let converted = quillToEmailHtml(String(html || ""));
+  let input = unescapeHtmlEntities(String(html || ""));
+
   // Second pass if still escaped (double-encoded templates)
-  if (/&lt;[a-zA-Z]|&#0*60;/i.test(converted)) {
-    converted = quillToEmailHtml(converted);
+  if (/<[a-zA-Z]|&#0*60;/i.test(input)) {
+    input = unescapeHtmlEntities(input);
   }
+
+  // CASE 1: already a full document (common for trademark templates)
+  // even when nested inside <div data-ea-converted="1">...</div>
+  const fullDoc = extractCleanFullDocument(input);
+  if (fullDoc) {
+    return fullDoc;
+  }
+
+  // CASE 2/3: fragment → quill convert then wrap
+  const converted = quillToEmailHtml(input);
   return wrapEmailHtmlDocument(converted);
 }
 
 export function quillToEmailHtml(html: string): string {
   if (!html || !html.trim()) return html;
   let result = unescapeHtmlEntities(html);
-  if (result.includes('data-ea-converted="1"')) return result;
+
+  // If someone passes a full document into quill path, strip to body first
   if (/<html[\s>]/i.test(result) || /<!DOCTYPE/i.test(result)) {
     const bodyMatch = result.match(/<body[^>]*>([\s\S]*)<\/body>/i);
     if (bodyMatch) result = bodyMatch[1];
+  }
+
+  // Strip outer data-ea-converted wrapper if present (re-process cleanly)
+  const eaMatch = result.match(
+    /<div[^>]*data-ea-converted\s*=\s*["']1["'][^>]*>([\s\S]*)<\/div>\s*$/i
+  );
+  if (eaMatch) {
+    result = eaMatch[1];
+  }
+
+  // If after strip we still have a full document, return body only for further processing
+  if (/<html[\s>]/i.test(result) || /<!DOCTYPE/i.test(result)) {
+    const bodyMatch2 = result.match(/<body[^>]*>([\s\S]*)<\/body>/i);
+    if (bodyMatch2) result = bodyMatch2[1];
   }
 
   const applyAlign = (align: string) => {
