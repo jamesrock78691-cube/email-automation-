@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import type SMTPTransport from "nodemailer/lib/smtp-transport";
 
 export function smtpLoginUser(account: {
   smtpUsername?: string | null;
@@ -19,10 +20,17 @@ export function smtpFromAddress(account: {
   return from || email;
 }
 
-export function smtpPortSecure(account: { smtpPort?: number | null; secure?: boolean | null }) {
+export function smtpPortSecure(account: {
+  smtpPort?: number | null;
+  secure?: boolean | null;
+}) {
   const port = Number(account?.smtpPort) || 587;
   const secure = port === 465;
-  return { port, secure, requireTLS: !secure && (port === 587 || port === 2525) };
+  return {
+    port,
+    secure,
+    requireTLS: !secure && (port === 587 || port === 2525),
+  };
 }
 
 export function createSmtpTransport(account: {
@@ -34,7 +42,8 @@ export function createSmtpTransport(account: {
   appPassword?: string | null;
 }) {
   const { port, secure, requireTLS } = smtpPortSecure(account);
-  return nodemailer.createTransport({
+
+  const options: SMTPTransport.Options = {
     host: account.smtpHost || "smtp-relay.brevo.com",
     port,
     secure,
@@ -48,5 +57,7 @@ export function createSmtpTransport(account: {
     socketTimeout: 25000,
     pool: false,
     tls: { rejectUnauthorized: false },
-  });
+  };
+
+  return nodemailer.createTransport(options);
 }
