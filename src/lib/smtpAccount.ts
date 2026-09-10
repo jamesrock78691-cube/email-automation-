@@ -55,7 +55,6 @@ export function createSmtpTransport(account: {
     connectionTimeout: 25000,
     greetingTimeout: 25000,
     socketTimeout: 25000,
-    pool: false,
     tls: { rejectUnauthorized: false },
   };
 
