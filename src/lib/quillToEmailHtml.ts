@@ -1,14 +1,97 @@
 /**
  * Quill → email HTML. Spacing exact jaisa editor mein likha / save kiya.
+ * Always produce real HTML (not escaped tags) for SMTP clients.
  */
+
+/** If content was double-encoded (<div>...), decode so clients render HTML */
+function unescapeHtmlEntities(html: string): string {
+  if (!html) return html;
+  // Only decode when it looks like escaped markup (otherwise leave normal text)
+  if (!/<\s*\/?\s*[a-z][a-z0-9]*\b/i.test(html)) return html;
+  return html
+    .replace(/</gi, "<")
+    .replace(/>/gi, ">")
+    .replace(/"/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/'/gi, "'")
+    .replace(/&nbsp;/gi, "\u00a0")
+    .replace(/&/gi, "&");
+}
+
+/** Full HTML document — many inbox clients need this to show rich HTML */
+export function wrapEmailHtmlDocument(bodyHtml: string): string {
+  const body = String(bodyHtml || "").trim();
+  if (!body) return "";
+  if (/<html[\s>]/i.test(body)) {
+    // Ensure charset meta exists
+    if (!/charset\s*=/i.test(body)) {
+      return body.replace(
+        /<head([^>]*)>/i,
+        '<head$1><meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />'
+      );
+    }
+    return body;
+  }
+  return (
+    "<!DOCTYPE html>\n" +
+    '<html lang="en">\n' +
+    "<head>\n" +
+    '<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />\n' +
+    '<meta charset="UTF-8" />\n' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1.0" />\n' +
+    "<title></title>\n" +
+    "</head>\n" +
+    '<body style="margin:0;padding:0;background-color:#ffffff;-webkit-text-size-adjust:100%;">\n' +
+    body +
+    "\n</body>\n</html>"
+  );
+}
+
+/** Strip tags for multipart text/plain alternative */
+export function htmlToPlainText(html: string): string {
+  return String(html || "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<\/div>/gi, "\n")
+    .replace(/<\/tr>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&/gi, "&")
+    .replace(/</gi, "<")
+    .replace(/>/gi, ">")
+    .replace(/"/gi, '"')
+    .replace(/\s+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+/**
+ * Final payload for nodemailer `html` field — always valid renderable HTML email.
+ */
+export function toSendableEmailHtml(html: string): string {
+  const converted = quillToEmailHtml(String(html || ""));
+  return wrapEmailHtmlDocument(converted);
+}
 
 export function quillToEmailHtml(html: string): string {
   if (!html || !html.trim()) return html;
 
-  let result = html;
+  let result = unescapeHtmlEntities(html);
 
+  // Already converted fragment — still OK to return (wrapper adds document)
   if (result.includes('data-ea-converted="1"')) {
     return result;
+  }
+
+  // If full document was pasted, work on body only then re-wrap later
+  if (/<html[\s>]/i.test(result) || /<!DOCTYPE/i.test(result)) {
+    const bodyMatch = result.match(/<body[^>]*>([\s\S]*)<\/body>/i);
+    if (bodyMatch) {
+      result = bodyMatch[1];
+    }
   }
 
   const applyAlign = (align: string) => {
@@ -135,10 +218,9 @@ function normalizeEmailSpacing(html: string): string {
     const re = new RegExp(`<${tag}(\\s[^>]*)?>`, "gi");
     result = result.replace(re, (full, attrs = "") => {
       attrs = attrs || "";
-      const base =
-        tag.startsWith("h")
-          ? "margin:0;padding:0;line-height:1.4;"
-          : "margin:0;padding:0;line-height:1.5;";
+      const base = tag.startsWith("h")
+        ? "margin:0;padding:0;line-height:1.4;"
+        : "margin:0;padding:0;line-height:1.5;";
 
       if (/\sstyle\s*=\s*"/i.test(attrs)) {
         return full.replace(/style\s*=\s*"([^"]*)"/i, (_m, styles) => {
