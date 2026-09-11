@@ -121,19 +121,22 @@ export async function GET(request: NextRequest) {
       list = await db.select().from(gmailAccounts).orderBy(gmailAccounts.id);
     }
 
-    // Lazy daily reset at 07:00 Asia/Karachi so UI shows correct remaining
+    // Lazy daily reset at 07:00 Asia/Karachi so UI shows correct remaining.
+    // Manual "disabled" stays disabled — only temporary cooldown auto-revives.
     const now = new Date();
     for (let i = 0; i < list.length; i++) {
       const acc = list[i];
-      const coolDone = !acc.cooldownUntil || new Date(acc.cooldownUntil) <= now;
-      if ((acc.status === "disabled" || acc.status === "cooldown") && coolDone) {
-        try {
-          await db
-            .update(gmailAccounts)
-            .set({ status: "enabled", cooldownUntil: null })
-            .where(eq(gmailAccounts.id, acc.id));
-          list[i] = { ...list[i], status: "enabled", cooldownUntil: null };
-        } catch { /* ignore */ }
+      if (acc.status === "cooldown") {
+        const coolDone = !acc.cooldownUntil || new Date(acc.cooldownUntil) <= now;
+        if (coolDone) {
+          try {
+            await db
+              .update(gmailAccounts)
+              .set({ status: "enabled", cooldownUntil: null })
+              .where(eq(gmailAccounts.id, acc.id));
+            list[i] = { ...list[i], status: "enabled", cooldownUntil: null };
+          } catch { /* ignore */ }
+        }
       }
       if (shouldResetDailyQuota(acc.lastUsedAt, now) && (acc.sentToday || 0) > 0) {
         try {
@@ -292,7 +295,13 @@ export async function PUT(request: NextRequest) {
     if (priority !== undefined) updates.priority = Number(priority);
     if (dailyLimit !== undefined) updates.dailyLimit = Number(dailyLimit);
     if (minuteLimit !== undefined) updates.minuteLimit = Number(minuteLimit);
-    if (status !== undefined) updates.status = status;
+    if (status !== undefined) {
+      updates.status = status;
+      // Manual disable must stick — clear cooldown so nothing auto-enables it
+      if (String(status).toLowerCase() === "disabled") {
+        updates.cooldownUntil = null;
+      }
+    }
 
     if (resetLimits) {
       updates.sentToday = 0;

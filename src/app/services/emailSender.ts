@@ -191,12 +191,12 @@ export async function processNextQueueItem(
       needsUpdate = true;
     }
 
-    // Clear expired cooldown and auto-revive disabled ids
+    // Clear expired cooldown timestamps. Never auto-enable a manually disabled SMTP.
     if (acc.cooldownUntil && acc.cooldownUntil <= now) {
       updates.cooldownUntil = null;
       needsUpdate = true;
     }
-    if (acc.status === "disabled" || acc.status === "cooldown") {
+    if (acc.status === "cooldown") {
       const coolDone = !acc.cooldownUntil || acc.cooldownUntil <= now;
       if (coolDone) {
         updates.status = "enabled";
