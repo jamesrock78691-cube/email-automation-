@@ -7,39 +7,58 @@ import {
   campaigns,
   trackingLogs,
   settings,
-  users,
 } from "@/db/schema";
-import { count, eq, desc, sql, inArray, and, or } from "drizzle-orm";
-import { jwtVerify } from "jose";
+import { count, eq, desc, sql, inArray, and } from "drizzle-orm";
+import { createHmac, timingSafeEqual } from "crypto";
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET || "email-automation-secret-key-change-me"
-);
+const SECRET: string =
+  process.env.AUTH_SECRET ||
+  process.env.JWT_SECRET ||
+  "email-automation-secret-key-change-me";
 
-async function verifyToken(token: string) {
+function sign(payloadB64: string) {
+  return createHmac("sha256", SECRET).update(payloadB64).digest("hex");
+}
+
+function verifyToken(token: string): {
+  userId: number;
+  username: string;
+  role: string;
+  exp: number;
+} | null {
   try {
-    const { payload } = await jwtVerify(token, JWT_SECRET);
-    return {
-      userId: payload.userId as number,
-      username: (payload.username as string) || "",
-      role: (payload.role as string) || "operator",
-    };
+    const [payloadB64, sig] = token.split(".");
+    if (!payloadB64 || !sig) return null;
+    const expected = sign(payloadB64);
+    const a = Buffer.from(sig, "hex");
+    const b = Buffer.from(expected, "hex");
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+    const json = Buffer.from(
+      payloadB64.replace(/-/g, "+").replace(/_/g, "/"),
+      "base64"
+    ).toString("utf8");
+    const data = JSON.parse(json);
+    if (!data.exp || Date.now() > data.exp) return null;
+    return data;
   } catch {
     return null;
   }
 }
 
 function getSession(req: NextRequest) {
-  const auth = req.headers.get("authorization");
-  const token = auth?.startsWith("Bearer ")
-    ? auth.slice(7).trim()
-    : req.cookies.get("ea_session")?.value;
+  const authHeader = req.headers.get("authorization");
+  const bearer =
+    authHeader && authHeader.startsWith("Bearer ")
+      ? authHeader.slice(7).trim()
+      : "";
+  const cookie = req.cookies.get("ea_session")?.value;
+  const token = bearer || cookie;
   if (!token) return null;
   return verifyToken(token);
 }
 
 function normalizeRole(role: string, username?: string) {
-  const r = (role || "").toLowerCase();
+  const r = (role || "").toLowerCase().replace(/-/g, "_");
   if (r === "super_admin" || r === "superadmin") return "super_admin";
   if (r === "admin") return "admin";
   if (username === "admin" || username === "superadmin") return "super_admin";
@@ -48,7 +67,7 @@ function normalizeRole(role: string, username?: string) {
 
 export async function GET(req: NextRequest) {
   try {
-    const session = await getSession(req);
+    const session = getSession(req);
     const role = session
       ? normalizeRole(session.role, session.username)
       : "guest";
@@ -102,7 +121,10 @@ export async function GET(req: NextRequest) {
           .select({ value: count() })
           .from(queue)
           .where(
-            and(eq(queue.status, "sent"), inArray(queue.gmailUsedId, operatorGmailIds))
+            and(
+              eq(queue.status, "sent"),
+              inArray(queue.gmailUsedId, operatorGmailIds)
+            )
           );
         const viaN = sentVia[0]?.value || 0;
         if (viaN > 0) sentCount = viaN;
@@ -112,7 +134,7 @@ export async function GET(req: NextRequest) {
           .select({ trackingId: queue.trackingId, email: queue.email })
           .from(queue)
           .where(inArray(queue.gmailUsedId, operatorGmailIds));
-        const myTrackIds = mySent.map((r) => r.trackingId).filter(Boolean);
+        const myTrackIds = mySent.map((r) => r.trackingId).filter(Boolean) as string[];
         const myEmails = new Set(
           mySent.map((r) => (r.email || "").toLowerCase()).filter(Boolean)
         );
@@ -133,7 +155,6 @@ export async function GET(req: NextRequest) {
           uniqueOpens = Number(uniq[0]?.value || 0);
           openedCount = uniqueOpens;
         } else {
-          // Fallback: match by email on tracking logs
           const allLogs = await db
             .select({
               email: trackingLogs.email,
@@ -156,7 +177,10 @@ export async function GET(req: NextRequest) {
           .select({ value: count() })
           .from(queue)
           .where(
-            and(eq(queue.status, "failed"), inArray(queue.gmailUsedId, operatorGmailIds))
+            and(
+              eq(queue.status, "failed"),
+              inArray(queue.gmailUsedId, operatorGmailIds)
+            )
           );
         failedCount = failedVia[0]?.value || 0;
 
@@ -217,7 +241,7 @@ export async function GET(req: NextRequest) {
         .from(trackingLogs);
       uniqueOpens = Number(uniqueAll[0]?.value || 0);
 
-      // Card "opened" = unique recipients who opened (same as Unique Opens card)
+      // Card "opened" = unique recipients who opened
       openedCount = uniqueOpens;
     }
 
@@ -234,24 +258,10 @@ export async function GET(req: NextRequest) {
 
     let templatesCount = 0;
     try {
-      const ownersRow = await db
-        .select()
-        .from(settings)
-        .where(eq(settings.key, "template_owners"))
-        .limit(1);
-      const owners: Record<string, number> = ownersRow.length
-        ? JSON.parse(ownersRow[0].value || "{}")
-        : {};
-      if (session && role === "operator") {
-        const tRes = await db.select({ value: count() }).from(templates);
-        templatesCount = tRes[0]?.value || 0;
-      } else {
-        const tRes = await db.select({ value: count() }).from(templates);
-        templatesCount = tRes[0]?.value || 0;
-      }
-    } catch {
       const tRes = await db.select({ value: count() }).from(templates);
       templatesCount = tRes[0]?.value || 0;
+    } catch {
+      templatesCount = 0;
     }
 
     const campaignsResult = await db.select({ value: count() }).from(campaigns);
@@ -335,14 +345,18 @@ export async function GET(req: NextRequest) {
       };
     });
 
-    // Operator: only opens for emails sent via their SMTP (best-effort)
+    // Operator: only opens for emails sent via their SMTP
     if (session && role === "operator" && operatorGmailIds.length > 0) {
       const mySent = await db
         .select({ email: queue.email, trackingId: queue.trackingId })
         .from(queue)
         .where(inArray(queue.gmailUsedId, operatorGmailIds));
-      const myEmails = new Set(mySent.map((r) => (r.email || "").toLowerCase()));
-      const myTracks = new Set(mySent.map((r) => r.trackingId).filter(Boolean));
+      const myEmails = new Set(
+        mySent.map((r) => (r.email || "").toLowerCase())
+      );
+      const myTracks = new Set(
+        mySent.map((r) => r.trackingId).filter(Boolean)
+      );
       recentOpens = recentOpens.filter(
         (op) =>
           (op.email && myEmails.has(op.email.toLowerCase())) ||
