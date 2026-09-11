@@ -1,1 +1,4 @@
-PLACEHOLDER_DO_NOT_USE
+use client";
+
+// RESTORE_MARKER - content will be fixed
+export default function Page() { return null; }
