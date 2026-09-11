@@ -4,7 +4,7 @@ import { randomUUID } from "crypto";
 
 import { db } from "@/db";
 import { queue, templates } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { inArray } from "drizzle-orm";
 
 const SHEET_ID = process.env.GOOGLE_SHEET_ID || "";
 const SHEET_NAME = process.env.GOOGLE_SHEET_NAME || "";
@@ -42,14 +42,14 @@ function ensureAuth() {
   return auth;
 }
 
-async function getAutoSheet() {
+async function getAutoSheet(opts?: { refresh?: boolean }) {
   if (!SHEET_ID) throw new Error("GOOGLE_SHEET_ID is missing in Vercel env");
   if (!SHEET_NAME) throw new Error("GOOGLE_SHEET_NAME is missing in Vercel env");
   const jwt = ensureAuth();
   if (!autoDoc) {
     autoDoc = new GoogleSpreadsheet(SHEET_ID, jwt);
   }
-  if (!autoInitialized) {
+  if (!autoInitialized || opts?.refresh) {
     await autoDoc.loadInfo();
     autoInitialized = true;
   }
@@ -99,6 +99,95 @@ export interface GoogleSheetRow {
   openCount: string;
   trackingId: string;
   gmailUsed: string;
+}
+
+function headerIndex(headers: string[], ...names: string[]): number {
+  const want = names.map((n) => n.trim().toLowerCase());
+  return headers.findIndex((h) =>
+    want.includes(String(h || "").trim().toLowerCase())
+  );
+}
+
+function colLetter(index: number): string {
+  let n = index + 1;
+  let s = "";
+  while (n > 0) {
+    const r = (n - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+type SheetCellPatch = {
+  rowNumber: number;
+  status?: string;
+  trackingId?: string;
+  sentAt?: string;
+  openedAt?: string;
+  openCount?: string;
+  gmailUsed?: string;
+};
+
+/** One Sheets round-trip for many cells (no per-row save). */
+async function batchSetSheetCells(updates: SheetCellPatch[]) {
+  if (!updates.length) return;
+  const sheet = await getAutoSheet();
+  await sheet.loadHeaderRow();
+  const headers: string[] = (sheet.headerValues || []).map((h: any) =>
+    String(h || "")
+  );
+  const cols = {
+    status: headerIndex(headers, "Status", "status"),
+    trackingId: headerIndex(
+      headers,
+      "Tracking ID",
+      "tracking_id",
+      "Tracking Id"
+    ),
+    sentAt: headerIndex(headers, "Sent At", "sent_at"),
+    openedAt: headerIndex(headers, "Opened At", "opened_at"),
+    openCount: headerIndex(headers, "Open Count", "open_count"),
+    gmailUsed: headerIndex(headers, "Gmail Used", "gmail_used"),
+  };
+  const used = Object.values(cols).filter((c) => c >= 0);
+  if (!used.length) return;
+
+  const startCol = Math.min(...used);
+  const endCol = Math.max(...used);
+  const sorted = [...updates].sort((a, b) => a.rowNumber - b.rowNumber);
+
+  const CHUNK = 250;
+  for (let i = 0; i < sorted.length; i += CHUNK) {
+    const chunk = sorted.slice(i, i + CHUNK);
+    const minRow = chunk[0].rowNumber;
+    const maxRow = chunk[chunk.length - 1].rowNumber;
+    const a1 = `${colLetter(startCol)}${minRow}:${colLetter(endCol)}${maxRow}`;
+    await sheet.loadCells(a1);
+
+    for (const u of chunk) {
+      const r = u.rowNumber - 1;
+      if (u.status !== undefined && cols.status >= 0) {
+        sheet.getCell(r, cols.status).value = u.status;
+      }
+      if (u.trackingId !== undefined && cols.trackingId >= 0) {
+        sheet.getCell(r, cols.trackingId).value = u.trackingId;
+      }
+      if (u.sentAt !== undefined && cols.sentAt >= 0) {
+        sheet.getCell(r, cols.sentAt).value = u.sentAt;
+      }
+      if (u.openedAt !== undefined && cols.openedAt >= 0) {
+        sheet.getCell(r, cols.openedAt).value = u.openedAt;
+      }
+      if (u.openCount !== undefined && cols.openCount >= 0) {
+        sheet.getCell(r, cols.openCount).value = u.openCount;
+      }
+      if (u.gmailUsed !== undefined && cols.gmailUsed >= 0) {
+        sheet.getCell(r, cols.gmailUsed).value = u.gmailUsed;
+      }
+    }
+    await sheet.saveUpdatedCells();
+  }
 }
 
 export async function readRows(): Promise<GoogleSheetRow[]> {
@@ -156,29 +245,21 @@ export async function updateRow(
   rowNumber: number,
   values: Partial<GoogleSheetRow>
 ) {
-  const sheet = await getAutoSheet();
-  const rows = await sheet.getRows();
-  const row = rows.find((r: any) => r.rowNumber === rowNumber);
-
-  if (!row) throw new Error(`Google Sheet row ${rowNumber} not found.`);
-
-  if (values.status !== undefined) row.set("Status", values.status);
-  if (values.sentAt !== undefined) row.set("Sent At", values.sentAt);
-  if (values.openedAt !== undefined) row.set("Opened At", values.openedAt);
-  if (values.openCount !== undefined) row.set("Open Count", values.openCount);
-  if (values.trackingId !== undefined)
-    row.set("Tracking ID", values.trackingId);
-  if (values.gmailUsed !== undefined) row.set("Gmail Used", values.gmailUsed);
-
-  await row.save();
+  await batchSetSheetCells([
+    {
+      rowNumber,
+      status: values.status,
+      trackingId: values.trackingId,
+      sentAt: values.sentAt,
+      openedAt: values.openedAt,
+      openCount: values.openCount,
+      gmailUsed: values.gmailUsed,
+    },
+  ]);
 }
 
 export async function getPendingRows() {
   const rows = await readRows();
-
-  console.log("TOTAL SHEET ROWS:", rows.length);
-  rows.forEach((row, index) => console.log("ROW", index + 1, row));
-
   const pendingRows = rows.filter((row) => {
     const email = (row.email || "").trim();
     if (!email) return false;
@@ -189,72 +270,93 @@ export async function getPendingRows() {
     }
     return true;
   });
-
-  console.log("PENDING ROWS:", pendingRows.length);
+  console.log(
+    `Sheet rows: ${rows.length}, pending to import: ${pendingRows.length}`
+  );
   return pendingRows;
 }
 
 export async function importPendingRowsToQueue(forcedTemplateId?: number | null) {
+  const t0 = Date.now();
+  await getAutoSheet({ refresh: true });
   const rows = await getPendingRows();
-  console.log("TOTAL ROWS TO IMPORT:", rows.length);
 
   const allTemplates = await db.select().from(templates);
   const templatesByName = new Map(
     allTemplates.map((t) => [t.name.trim().toLowerCase(), t.id])
   );
   const fallbackTemplateId =
-  forcedTemplateId != null && allTemplates.some((t) => t.id === forcedTemplateId)
-    ? forcedTemplateId
-    : allTemplates.length > 0
-    ? allTemplates[0].id
-    : null;
+    forcedTemplateId != null &&
+    allTemplates.some((t) => t.id === forcedTemplateId)
+      ? forcedTemplateId
+      : allTemplates.length > 0
+        ? allTemplates[0].id
+        : null;
 
   let imported = 0;
   let skipped = 0;
   const errors: string[] = [];
 
+  const serials = Array.from(
+    new Set(
+      rows
+        .map((r) => (r.serialNo || "").trim())
+        .filter((s) => s.length > 0)
+    )
+  );
+
+  const existingMap = new Map<string, string>();
+  const SERIAL_CHUNK = 400;
+  for (let i = 0; i < serials.length; i += SERIAL_CHUNK) {
+    const chunk = serials.slice(i, i + SERIAL_CHUNK);
+    const existing = await db
+      .select({
+        serialNo: queue.serialNo,
+        trackingId: queue.trackingId,
+      })
+      .from(queue)
+      .where(inArray(queue.serialNo, chunk));
+    for (const e of existing) {
+      if (e.serialNo) existingMap.set(e.serialNo.trim(), e.trackingId || "");
+    }
+  }
+
+  const toInsert: any[] = [];
+  const sheetUpdates: SheetCellPatch[] = [];
+  const seenSerial = new Set<string>();
+
   for (const row of rows) {
     try {
+      const serialTrim = (row.serialNo || "").trim();
       const serial =
-        (row.serialNo || "").trim() ||
+        serialTrim ||
         `AUTO-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 
-      if (row.serialNo && row.serialNo.trim()) {
-        const existing = await db
-          .select()
-          .from(queue)
-          .where(eq(queue.serialNo, row.serialNo.trim()))
-          .limit(1);
-        if (existing.length > 0) {
-          skipped++;
-          const st = (row.status || "").trim().toLowerCase();
-          if (!st || st === "pending") {
-            try {
-              await updateRow(row.rowNumber, {
-                status: "Imported",
-                trackingId: existing[0].trackingId || row.trackingId || "",
-              });
-            } catch {}
-          }
-          continue;
+      if (serialTrim && (existingMap.has(serialTrim) || seenSerial.has(serialTrim))) {
+        skipped++;
+        const st = (row.status || "").trim().toLowerCase();
+        if (!st || st === "pending") {
+          sheetUpdates.push({
+            rowNumber: row.rowNumber,
+            status: "Imported",
+            trackingId:
+              existingMap.get(serialTrim) || row.trackingId || "",
+          });
         }
+        continue;
       }
 
       let templateId: number | null = null;
       if (row.templateName && row.templateName.trim()) {
-        const found = templatesByName.get(
-          row.templateName.trim().toLowerCase()
-        );
+        const found = templatesByName.get(row.templateName.trim().toLowerCase());
         if (found) templateId = found;
       }
-      if (templateId == null) {
-        templateId = fallbackTemplateId;
-      }
+      if (templateId == null) templateId = fallbackTemplateId;
 
       const trackingId =
         (row.trackingId && row.trackingId.trim()) || randomUUID();
 
-      await db.insert(queue).values({
+      toInsert.push({
         campaignId: null,
         referenceNo: (row.referenceNo || "").trim() || "N/A",
         serialNo: serial,
@@ -272,32 +374,50 @@ export async function importPendingRowsToQueue(forcedTemplateId?: number | null)
         tries: 0,
         maxTries: 3,
       });
-
-      try {
-        await updateRow(row.rowNumber, {
-          status: "Imported",
-          trackingId,
-        });
-      } catch (sheetErr: any) {
-        console.error(
-          "Sheet status update failed for row",
-          row.rowNumber,
-          sheetErr?.message || sheetErr
-        );
-        errors.push(
-          `${row.email}: imported to queue but sheet Status update failed (${sheetErr?.message || "error"})`
-        );
-      }
-
+      sheetUpdates.push({
+        rowNumber: row.rowNumber,
+        status: "Imported",
+        trackingId,
+      });
+      seenSerial.add(serial);
+      existingMap.set(serial, trackingId);
       imported++;
     } catch (err: any) {
-      console.error("Import row error:", row.email, err);
       errors.push(
-        `${row.email}: ${err?.cause?.message || err?.message || "insert failed"}`
+        `${row.email}: ${err?.cause?.message || err?.message || "prepare failed"}`
       );
     }
   }
 
+  const INSERT_CHUNK = 80;
+  for (let i = 0; i < toInsert.length; i += INSERT_CHUNK) {
+    const chunk = toInsert.slice(i, i + INSERT_CHUNK);
+    try {
+      await db.insert(queue).values(chunk);
+    } catch (err: any) {
+      for (const item of chunk) {
+        try {
+          await db.insert(queue).values(item);
+        } catch (oneErr: any) {
+          imported = Math.max(0, imported - 1);
+          errors.push(
+            `${item.email}: ${oneErr?.cause?.message || oneErr?.message || "insert failed"}`
+          );
+        }
+      }
+    }
+  }
+
+  try {
+    await batchSetSheetCells(sheetUpdates);
+  } catch (sheetErr: any) {
+    console.error("batch sheet import update failed:", sheetErr);
+    errors.push(
+      `Queue imported but sheet Status update failed: ${sheetErr?.message || sheetErr}`
+    );
+  }
+
+  const ms = Date.now() - t0;
   return {
     success: errors.length === 0,
     imported,
@@ -305,7 +425,7 @@ export async function importPendingRowsToQueue(forcedTemplateId?: number | null)
     errors,
     message: `Imported ${imported}, skipped ${skipped}${
       errors.length ? `, errors ${errors.length}` : ""
-    }`,
+    } in ${Math.round(ms / 100) / 10}s`,
   };
 }
 

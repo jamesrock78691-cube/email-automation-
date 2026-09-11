@@ -6,6 +6,9 @@ import { randomUUID } from "crypto";
 import { processNextQueueItem } from "@/app/services/emailSender";
 import { importPendingRowsToQueue } from "@/app/services/googleSheets";
 
+export const maxDuration = 60;
+export const dynamic = "force-dynamic";
+
 export async function GET(request: NextRequest) {
   try {
     const list = await db.select().from(queue).orderBy(desc(queue.createdAt));

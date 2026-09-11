@@ -658,7 +658,7 @@ const quillFormats = [
     try {
       setLoading(true);
       setErrorMsg("");
-      setSuccessMsg("");
+      setSuccessMsg("Google Sheet se import chal raha hai — wait karo, rukna nahi chahiye…");
 
       const res = await fetch("/api/queue", {
         method: "POST",
@@ -2873,7 +2873,7 @@ const handleAttachmentUpload = async (
                     disabled={loading}
                     className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-sm px-5 py-2.5 rounded-xl disabled:opacity-50"
                   >
-                    Import from Live Google Sheet
+                    {loading ? "Importing from Google Sheet…" : "Import from Live Google Sheet"}
                   </button>
                   <button
                     type="button"
