@@ -10,7 +10,7 @@ import {
   users,
 } from "@/db/schema";
 import { seedDatabase } from "@/db/seed";
-import { count, eq, desc, sql, inArray } from "drizzle-orm";
+import { count, eq, desc, sql, inArray, and, or } from "drizzle-orm";
 import { createHmac, timingSafeEqual } from "crypto";
 
 const SECRET =
@@ -90,39 +90,144 @@ export async function GET(request: NextRequest) {
     await seedDatabase();
 
     const session = getSession(request);
+    const role = session
+      ? normalizeRole(session.role, session.username)
+      : "operator";
+    const isSuper = role === "super_admin";
 
-    const totalEmailsResult = await db.select({ value: count() }).from(queue);
-    const totalCount = totalEmailsResult[0]?.value || 0;
+    let operatorGmailIds: number[] = [];
+    if (session && role === "operator") {
+      const assignments = await getSmtpAssignments();
+      operatorGmailIds = (
+        assignments[String(session.userId)] ||
+        assignments[session.username] ||
+        []
+      )
+        .map((id: any) => Number(id))
+        .filter((id: number) => !isNaN(id) && id > 0);
+    }
 
-    const sentEmailsResult = await db
-      .select({ value: count() })
-      .from(queue)
-      .where(eq(queue.status, "sent"));
-    const sentCount = sentEmailsResult[0]?.value || 0;
+    let totalCount = 0;
+    let sentCount = 0;
+    let pendingCount = 0;
+    let sendingCount = 0;
+    let failedCount = 0;
+    let openedCount = 0;
+    let uniqueOpens = 0;
+    let totalOpenEvents = 0;
 
-    const pendingEmailsResult = await db
-      .select({ value: count() })
-      .from(queue)
-      .where(eq(queue.status, "pending"));
-    const pendingCount = pendingEmailsResult[0]?.value || 0;
+    if (session && role === "operator") {
+      try {
+        const statsRows = await db
+          .select()
+          .from(settings)
+          .where(eq(settings.key, "agent_stats"))
+          .limit(1);
+        const statsMap = statsRows.length
+          ? JSON.parse(statsRows[0].value || "{}")
+          : {};
+        const my = statsMap[String(session.userId)] || {};
+        sentCount = Number(my.totalSent) || 0;
+      } catch {
+        sentCount = 0;
+      }
 
-    const sendingEmailsResult = await db
-      .select({ value: count() })
-      .from(queue)
-      .where(eq(queue.status, "sending"));
-    const sendingCount = sendingEmailsResult[0]?.value || 0;
+      if (operatorGmailIds.length > 0) {
+        const sentVia = await db
+          .select({ value: count() })
+          .from(queue)
+          .where(
+            and(eq(queue.status, "sent"), inArray(queue.gmailUsedId, operatorGmailIds))
+          );
+        const viaN = sentVia[0]?.value || 0;
+        if (viaN > 0) sentCount = viaN;
 
-    const failedEmailsResult = await db
-      .select({ value: count() })
-      .from(queue)
-      .where(eq(queue.status, "failed"));
-    const failedCount = failedEmailsResult[0]?.value || 0;
+        const openedVia = await db
+          .select({ value: count() })
+          .from(queue)
+          .where(
+            and(sql`${queue.openCount} > 0`, inArray(queue.gmailUsedId, operatorGmailIds))
+          );
+        openedCount = openedVia[0]?.value || 0;
+        uniqueOpens = openedCount;
 
-    const openedResult = await db
-      .select({ value: count() })
-      .from(queue)
-      .where(sql`${queue.openCount} > 0`);
-    const openedCount = openedResult[0]?.value || 0;
+        const failedVia = await db
+          .select({ value: count() })
+          .from(queue)
+          .where(
+            and(eq(queue.status, "failed"), inArray(queue.gmailUsedId, operatorGmailIds))
+          );
+        failedCount = failedVia[0]?.value || 0;
+
+        const pendingEmailsResult = await db
+          .select({ value: count() })
+          .from(queue)
+          .where(eq(queue.status, "pending"));
+        pendingCount = pendingEmailsResult[0]?.value || 0;
+
+        const sendingEmailsResult = await db
+          .select({ value: count() })
+          .from(queue)
+          .where(eq(queue.status, "sending"));
+        sendingCount = sendingEmailsResult[0]?.value || 0;
+
+        totalCount = sentCount + pendingCount + sendingCount + failedCount;
+      } else {
+        totalCount = sentCount;
+      }
+    } else {
+      const totalEmailsResult = await db.select({ value: count() }).from(queue);
+      totalCount = totalEmailsResult[0]?.value || 0;
+
+      const sentEmailsResult = await db
+        .select({ value: count() })
+        .from(queue)
+        .where(eq(queue.status, "sent"));
+      sentCount = sentEmailsResult[0]?.value || 0;
+
+      const pendingEmailsResult = await db
+        .select({ value: count() })
+        .from(queue)
+        .where(eq(queue.status, "pending"));
+      pendingCount = pendingEmailsResult[0]?.value || 0;
+
+      const sendingEmailsResult = await db
+        .select({ value: count() })
+        .from(queue)
+        .where(eq(queue.status, "sending"));
+      sendingCount = sendingEmailsResult[0]?.value || 0;
+
+      const failedEmailsResult = await db
+        .select({ value: count() })
+        .from(queue)
+        .where(eq(queue.status, "failed"));
+      failedCount = failedEmailsResult[0]?.value || 0;
+
+      const openedResult = await db
+        .select({ value: count() })
+        .from(queue)
+        .where(sql`${queue.openCount} > 0`);
+      openedCount = openedResult[0]?.value || 0;
+
+      const uniqueQueueOpens = await db
+        .select({ value: sql<number>`count(distinct ${queue.email})` })
+        .from(queue)
+        .where(sql`${queue.openCount} > 0`);
+      const uniqueManual = await db
+        .select({
+          value: sql<number>`count(distinct coalesce(${trackingLogs.email}, ${trackingLogs.trackingId}))`,
+        })
+        .from(trackingLogs)
+        .where(sql`${trackingLogs.queueId} is null`);
+      uniqueOpens =
+        Number(uniqueQueueOpens[0]?.value || 0) +
+        Number(uniqueManual[0]?.value || 0);
+
+      const totalEvents = await db
+        .select({ value: count() })
+        .from(trackingLogs);
+      totalOpenEvents = totalEvents[0]?.value || 0;
+    }
 
     const activeGmailResult = await db
       .select({ value: count() })
@@ -136,37 +241,31 @@ export async function GET(request: NextRequest) {
     const totalGmailCount = totalGmailResult[0]?.value || 0;
 
     let templatesCount = 0;
-try {
-  const ownersRow = await db
-    .select()
-    .from(settings)
-    .where(eq(settings.key, "template_owners"))
-    .limit(1);
-  const owners: Record<string, number> = ownersRow.length
-    ? JSON.parse(ownersRow[0].value || "{}")
-    : {};
-
-  const allTpls = await db.select({ id: templates.id }).from(templates);
-
-  if (session) {
-    const role = normalizeRole(session.role, session.username);
-    if (role === "super_admin") {
-      templatesCount = allTpls.filter((t) => {
-        const ownerId = owners[String(t.id)];
-        return ownerId == null || ownerId === session.userId;
-      }).length;
-    } else {
-      templatesCount = allTpls.filter(
-        (t) => owners[String(t.id)] === session.userId
-      ).length;
+    try {
+      const ownersRow = await db
+        .select()
+        .from(settings)
+        .where(eq(settings.key, "template_owners"))
+        .limit(1);
+      const owners: Record<string, number> = ownersRow.length
+        ? JSON.parse(ownersRow[0].value || "{}")
+        : {};
+      const allTpls = await db.select({ id: templates.id }).from(templates);
+      if (session) {
+        if (isSuper) {
+          templatesCount = allTpls.length;
+        } else {
+          templatesCount = allTpls.filter(
+            (t) => owners[String(t.id)] === session.userId
+          ).length;
+        }
+      } else {
+        templatesCount = allTpls.length;
+      }
+    } catch {
+      const r = await db.select({ value: count() }).from(templates);
+      templatesCount = r[0]?.value || 0;
     }
-  } else {
-    templatesCount = allTpls.length;
-  }
-} catch {
-  const r = await db.select({ value: count() }).from(templates);
-  templatesCount = r[0]?.value || 0;
-}
 
     const campaignsResult = await db
       .select({ value: count() })
@@ -176,36 +275,37 @@ try {
     const openRate =
       sentCount > 0 ? Math.round((openedCount / sentCount) * 100) : 0;
 
-    const recentQueueLogs = await db
-      .select()
-      .from(queue)
-      .orderBy(desc(queue.createdAt))
-      .limit(12);
+    let recentQueueLogs: any[] = [];
+    if (session && role === "operator" && operatorGmailIds.length > 0) {
+      recentQueueLogs = await db
+        .select()
+        .from(queue)
+        .where(
+          or(
+            inArray(queue.gmailUsedId, operatorGmailIds),
+            eq(queue.status, "pending")
+          )
+        )
+        .orderBy(desc(queue.createdAt))
+        .limit(12);
+    } else if (session && role === "operator") {
+      recentQueueLogs = [];
+    } else {
+      recentQueueLogs = await db
+        .select()
+        .from(queue)
+        .orderBy(desc(queue.createdAt))
+        .limit(12);
+    }
 
-    // Accounts — operator ko sirf assigned
     let accountsList: any[] = [];
-    const role = session
-      ? normalizeRole(session.role, session.username)
-      : "operator";
-
     if (session && role === "operator") {
-      const assignments = await getSmtpAssignments();
-      const allowedIds: number[] = (
-        assignments[String(session.userId)] ||
-        assignments[session.username] ||
-        []
-      )
-        .map((id: any) => Number(id))
-        .filter((id: number) => !isNaN(id) && id > 0);
-
-      if (allowedIds.length > 0) {
+      if (operatorGmailIds.length > 0) {
         accountsList = await db
           .select()
           .from(gmailAccounts)
-          .where(inArray(gmailAccounts.id, allowedIds))
+          .where(inArray(gmailAccounts.id, operatorGmailIds))
           .orderBy(gmailAccounts.id);
-      } else {
-        accountsList = [];
       }
     } else {
       accountsList = await db
@@ -214,7 +314,6 @@ try {
         .orderBy(gmailAccounts.id);
     }
 
-    // appPassword operator se hide
     if (role === "operator") {
       accountsList = accountsList.map((a) => {
         const { appPassword, ...rest } = a;
@@ -222,7 +321,6 @@ try {
       });
     }
 
-    // leftJoin so manual opens (queueId null) still appear; prefer log denormalized fields
     const recentOpensRaw = await db
       .select({
         id: trackingLogs.id,
@@ -246,7 +344,7 @@ try {
       .orderBy(desc(trackingLogs.openedAt))
       .limit(20);
 
-    const recentOpens = recentOpensRaw.map((op) => {
+    let recentOpens = recentOpensRaw.map((op) => {
       const isManual = op.queueId == null;
       return {
         id: op.id,
@@ -268,8 +366,24 @@ try {
           (isManual ? "Manual Send" : "—"),
         email: op.queueEmail || op.logEmail || "",
         serialNo: op.serialNo || "",
+        gmailUsedId: null as number | null,
       };
     });
+
+    // Operator: only opens for emails sent via their SMTP (best-effort)
+    if (session && role === "operator" && operatorGmailIds.length > 0) {
+      const mySent = await db
+        .select({ email: queue.email, trackingId: queue.trackingId })
+        .from(queue)
+        .where(inArray(queue.gmailUsedId, operatorGmailIds));
+      const myEmails = new Set(mySent.map((r) => (r.email || "").toLowerCase()));
+      const myTrack = new Set(mySent.map((r) => r.trackingId));
+      recentOpens = recentOpens.filter(
+        (op) =>
+          myTrack.has(op.trackingId) ||
+          myEmails.has((op.email || "").toLowerCase())
+      );
+    }
 
     return NextResponse.json({
       success: true,
@@ -280,11 +394,14 @@ try {
         sending: sendingCount,
         failed: failedCount,
         opened: openedCount,
+        uniqueOpens,
+        totalOpenEvents,
         openRate,
         activeGmailCount,
         totalGmailCount,
         templatesCount,
         campaignsCount,
+        scope: role === "operator" ? "own" : "global",
       },
       accounts: accountsList,
       recentQueue: recentQueueLogs,
