@@ -1,4 +1,5 @@
 import fs from "fs";
+import { randomUUID } from "crypto";
 import { db } from "@/db";
 import { gmailAccounts, queue, templates, campaigns } from "@/db/schema";
 import { eq, asc, and, or, isNull, lte } from "drizzle-orm";
@@ -7,6 +8,7 @@ import { readRows, updateRow } from "@/app/services/googleSheets";
 import {
   buildTrackingPixelHtml,
   injectTrackingPixel,
+  getAppBaseUrl,
 } from "@/lib/trackingPixel";
 import { smtpFromAddress, createSmtpTransport } from "@/lib/smtpAccount";
 
@@ -158,6 +160,22 @@ export async function processNextQueueItem(
 
   const item = pendingItems[0];
 
+  // Ensure trackingId always exists (older rows / bad imports)
+  let trackingId = String(item.trackingId || "").trim();
+  if (!trackingId) {
+    trackingId = randomUUID();
+    await db
+      .update(queue)
+      .set({ trackingId })
+      .where(eq(queue.id, item.id));
+    item.trackingId = trackingId;
+  }
+
+  // Prefer stable production base URL for pixel (avoid dead preview hosts)
+  const pixelBase =
+    (baseUrl && !/localhost|127\.0\.0\.1/i.test(baseUrl) ? baseUrl : "") ||
+    getAppBaseUrl();
+
   // 2. Load accounts (include disabled so we can auto-revive after cooldown)
   const accounts = await db.select().from(gmailAccounts);
 
@@ -268,7 +286,7 @@ export async function processNextQueueItem(
     day: "numeric",
   });
 
-  const trackingPixelHtml = buildTrackingPixelHtml(baseUrl, item.trackingId);
+  const trackingPixelHtml = buildTrackingPixelHtml(pixelBase, trackingId);
 
   const variables = {
     reference_no: item.referenceNo || "",
@@ -514,7 +532,7 @@ export async function processNextQueueItem(
           status: "Sent",
           sentAt: new Date().toISOString(),
           gmailUsed: finalUsedAccount.email,
-          trackingId: item.trackingId,
+          trackingId: trackingId,
         });
       }
     } catch (err) {
