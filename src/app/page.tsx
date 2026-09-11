@@ -1861,7 +1861,7 @@ const handleAttachmentUpload = async (
         )}
 
         {/* Global Stats Grid — Super Admin / Admin only */}
-        {authUser?.role !== "operator" && (
+        {can("dashboard") && (
         <section className="grid grid-cols-2 md:grid-cols-5 gap-4">
           <div className="bg-slate-950/40 border border-slate-800 p-4 rounded-xl flex flex-col justify-between hover:border-slate-700 transition">
             <span className="text-xs text-slate-400 font-medium">Total Ingested Queue</span>
