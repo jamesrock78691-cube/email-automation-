@@ -1,54 +1,37 @@
 "use client";
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect } from "react";
 import dynamic from "next/dynamic";
 import {
   Mail,
-  RotateCw,
-  Sliders,
-  FileCode,
-  Layers,
-  Database,
-  PlusCircle,
-  Play,
-  Pause,
   RefreshCw,
+  Cpu,
+  Users,
   CheckCircle,
   AlertTriangle,
-  Eye,
-  Trash2,
-  FileSpreadsheet,
-  Cpu,
-  Smartphone,
-  Globe,
-  Settings,
-  HelpCircle,
-  Users,
 } from "lucide-react";
-
-import { analyzeSpamRisk } from "@/lib/spamChecker";
-import { quillToEmailHtml } from "@/lib/quillToEmailHtml";
 
 const RichTextComposer = dynamic(
   () => import("../components/RichTextComposer"),
   { ssr: false }
 );
 
-const DEFAULT_SHEETS_CSV = `Reference No,Serial No,Mark Name,Filing Date,Email,CC,BCC,Subject,Template,Attachment\n`;
+type AuthUser = {
+  id: number;
+  username: string;
+  role: string;
+  permissions?: string[];
+  stats?: { totalSent: number; sentToday: number; dailyLimit: number };
+};
+
+const OPERATOR_DEFAULTS = ["compose", "templates"];
 
 export default function EmailAutomationDashboard() {
   const [activeTab, setActiveTab] = useState("compose");
-  const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
   const [authChecked, setAuthChecked] = useState(false);
-  const [authUser, setAuthUser] = useState<{
-    id: number;
-    username: string;
-    role: string;
-    permissions?: string[];
-    stats?: { totalSent: number; sentToday: number; dailyLimit: number };
-  } | null>(null);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [authToken, setAuthToken] = useState("");
   const [loginForm, setLoginForm] = useState({ username: "", password: "" });
   const [loginLoading, setLoginLoading] = useState(false);
@@ -56,26 +39,39 @@ export default function EmailAutomationDashboard() {
     totalEmails: 0,
     sent: 0,
     pending: 0,
-    sending: 0,
     failed: 0,
     opened: 0,
     uniqueOpens: 0,
-    openRate: "0%",
-    activeGmailCount: 0,
-    totalGmailCount: 0,
-    templatesCount: 0,
-    campaignsCount: 0,
+    openRate: 0,
     scope: "global",
   });
   const [queueItems, setQueueItems] = useState<any[]>([]);
   const [recentOpens, setRecentOpens] = useState<any[]>([]);
   const [adminUsers, setAdminUsers] = useState<any[]>([]);
 
-  const can = (perm: string) => {
-    if (!authUser) return false;
-    if (authUser.role === "super_admin") return true;
-    const perms = authUser.permissions || [];
-    if (perms.length) return perms.includes(perm);
+  const effectivePerms = (): string[] => {
+    if (!authUser) return [];
+    if (
+      authUser.role === "super_admin" ||
+      authUser.username === "admin" ||
+      authUser.username === "superadmin"
+    ) {
+      return [
+        "compose",
+        "dashboard",
+        "sheets",
+        "gmail",
+        "templates",
+        "campaigns",
+        "admin_panel",
+        "smtp_view",
+        "smtp_add",
+        "smtp_delete",
+        "manage_users",
+      ];
+    }
+    const p = authUser.permissions;
+    if (Array.isArray(p) && p.length > 0) return p;
     if (authUser.role === "admin") {
       return [
         "compose",
@@ -87,9 +83,20 @@ export default function EmailAutomationDashboard() {
         "admin_panel",
         "smtp_add",
         "manage_users",
-      ].includes(perm);
+      ];
     }
-    return perm === "compose" || perm === "templates";
+    return OPERATOR_DEFAULTS;
+  };
+
+  const can = (perm: string) => {
+    if (!authUser) return false;
+    if (
+      authUser.role === "super_admin" ||
+      authUser.username === "admin" ||
+      authUser.username === "superadmin"
+    )
+      return true;
+    return effectivePerms().includes(perm);
   };
 
   const isSuperAdmin = () =>
@@ -98,7 +105,7 @@ export default function EmailAutomationDashboard() {
       authUser.username === "admin" ||
       authUser.username === "superadmin");
 
-  const authHeaders = () => {
+  const authHeaders = (): Record<string, string> => {
     const h: Record<string, string> = { "Content-Type": "application/json" };
     const token =
       authToken ||
@@ -111,7 +118,7 @@ export default function EmailAutomationDashboard() {
 
   const showError = (m: string) => {
     setErrorMsg(m);
-    setTimeout(() => setErrorMsg(""), 5000);
+    setTimeout(() => setErrorMsg(""), 6000);
   };
   const showSuccess = (m: string) => {
     setSuccessMsg(m);
@@ -132,10 +139,14 @@ export default function EmailAutomationDashboard() {
         setAuthToken(saved);
         const res = await fetch("/api/auth?action=me", {
           headers: { Authorization: `Bearer ${saved}` },
+          credentials: "include",
         });
         const data = await res.json();
-        if (data.success && data.user) setAuthUser(data.user);
-        else localStorage.removeItem("ea_token");
+        if (data.success && data.user) {
+          setAuthUser(data.user);
+        } else {
+          localStorage.removeItem("ea_token");
+        }
       } catch {
         /* ignore */
       } finally {
@@ -146,20 +157,28 @@ export default function EmailAutomationDashboard() {
 
   useEffect(() => {
     if (!authUser) return;
-    if (authUser.role === "operator") {
-      const perms = authUser.permissions || [];
-      if (perms.includes("dashboard")) setActiveTab("dashboard");
-      else if (perms.includes("sheets")) setActiveTab("sheets_importer");
-      else if (perms.includes("gmail")) setActiveTab("gmail_accounts");
-      else if (perms.includes("templates")) setActiveTab("templates");
-      else setActiveTab("compose");
-    }
+    const perms = effectivePerms();
+    const order: { perm: string; tab: string }[] = [
+      { perm: "compose", tab: "compose" },
+      { perm: "dashboard", tab: "dashboard" },
+      { perm: "templates", tab: "templates" },
+      { perm: "sheets", tab: "sheets_importer" },
+      { perm: "gmail", tab: "gmail_accounts" },
+      { perm: "campaigns", tab: "campaigns_tab" },
+      { perm: "admin_panel", tab: "admin" },
+    ];
+    const first = order.find((o) => perms.includes(o.perm));
+    setActiveTab(first ? first.tab : "compose");
     loadDashboardData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authUser]);
 
   const loadDashboardData = async () => {
     try {
-      const res = await fetch("/api/dashboard", { headers: authHeaders() });
+      const res = await fetch("/api/dashboard", {
+        headers: authHeaders(),
+        credentials: "include",
+      });
       const data = await res.json();
       if (data.success) {
         setStats(data.stats || {});
@@ -175,6 +194,7 @@ export default function EmailAutomationDashboard() {
     try {
       const res = await fetch("/api/auth?action=list_users", {
         headers: authHeaders(),
+        credentials: "include",
       });
       const data = await res.json();
       if (data.success) setAdminUsers(data.list || data.users || []);
@@ -185,6 +205,7 @@ export default function EmailAutomationDashboard() {
 
   useEffect(() => {
     if (activeTab === "admin" && authUser) loadAdminUsers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, authUser]);
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -195,19 +216,24 @@ export default function EmailAutomationDashboard() {
       const res = await fetch("/api/auth", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({
           action: "login",
-          username: loginForm.username,
+          username: loginForm.username.trim(),
           password: loginForm.password,
         }),
       });
       const data = await res.json();
-      if (data.success) {
-        if (data.token) localStorage.setItem("ea_token", data.token);
-        setAuthToken(data.token || "");
+      if (data.success && data.user) {
+        if (data.token) {
+          localStorage.setItem("ea_token", data.token);
+          setAuthToken(data.token);
+        }
         setAuthUser(data.user);
         showSuccess(`Welcome, ${data.user.username}`);
-      } else showError(data.error || "Login failed");
+      } else {
+        showError(data.error || "Login failed");
+      }
     } catch (err: any) {
       showError(err.message || "Login error");
     } finally {
@@ -223,6 +249,7 @@ export default function EmailAutomationDashboard() {
     fetch("/api/auth", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "include",
       body: JSON.stringify({ action: "logout" }),
     }).catch(() => {});
   };
@@ -245,6 +272,7 @@ export default function EmailAutomationDashboard() {
           <h1 className="text-xl font-bold flex items-center gap-2">
             <Mail className="h-5 w-5 text-blue-400" /> Email Automation
           </h1>
+          <p className="text-xs text-slate-500">Operator / Admin login</p>
           {errorMsg && <p className="text-rose-400 text-sm">{errorMsg}</p>}
           {successMsg && (
             <p className="text-emerald-400 text-sm">{successMsg}</p>
@@ -257,6 +285,7 @@ export default function EmailAutomationDashboard() {
               setLoginForm({ ...loginForm, username: e.target.value })
             }
             required
+            autoComplete="username"
           />
           <input
             type="password"
@@ -267,11 +296,12 @@ export default function EmailAutomationDashboard() {
               setLoginForm({ ...loginForm, password: e.target.value })
             }
             required
+            autoComplete="current-password"
           />
           <button
             type="submit"
             disabled={loginLoading}
-            className="w-full bg-blue-600 hover:bg-blue-500 rounded-lg py-2.5 font-medium text-sm"
+            className="w-full bg-blue-600 hover:bg-blue-500 rounded-lg py-2.5 font-medium text-sm disabled:opacity-50"
           >
             {loginLoading ? "Signing in..." : "Login"}
           </button>
@@ -280,18 +310,26 @@ export default function EmailAutomationDashboard() {
     );
   }
 
+  const perms = effectivePerms();
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <header className="border-b border-slate-800 px-4 py-3 flex items-center justify-between">
         <div className="font-semibold flex items-center gap-2">
           <Mail className="h-5 w-5 text-blue-400" />
-          Email Automation Dashboard
+          Email Automation
         </div>
         <div className="flex items-center gap-3 text-sm">
           <span className="text-slate-400">
             {authUser.username}{" "}
             <span className="text-slate-500">({authUser.role})</span>
           </span>
+          {authUser.stats && (
+            <span className="text-xs text-slate-500 hidden sm:inline">
+              Today: {authUser.stats.sentToday || 0}/
+              {authUser.stats.dailyLimit || 100}
+            </span>
+          )}
           <button
             onClick={handleLogout}
             className="text-slate-400 hover:text-white"
@@ -302,26 +340,25 @@ export default function EmailAutomationDashboard() {
       </header>
 
       {errorMsg && (
-        <div className="mx-4 mt-3 p-2 bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm rounded">
-          {errorMsg}
+        <div className="mx-4 mt-3 p-2 bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm rounded flex items-center gap-2">
+          <AlertTriangle className="h-4 w-4" /> {errorMsg}
         </div>
       )}
       {successMsg && (
-        <div className="mx-4 mt-3 p-2 bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-sm rounded">
-          {successMsg}
+        <div className="mx-4 mt-3 p-2 bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-sm rounded flex items-center gap-2">
+          <CheckCircle className="h-4 w-4" /> {successMsg}
         </div>
       )}
 
-      {/* Top stats — super admin = global; operator with dashboard = own */}
-      {(isSuperAdmin() ||
-        authUser.role === "admin" ||
-        can("dashboard")) && (
+      {(isSuperAdmin() || authUser.role === "admin" || can("dashboard")) && (
         <section className="grid grid-cols-2 md:grid-cols-5 gap-3 p-4">
           <div className="bg-slate-900/60 border border-slate-800 p-3 rounded-xl">
             <span className="text-xs text-slate-400">
-              {stats.scope === "own" ? "My Emails" : "Total Queue"}
+              {stats.scope === "own" ? "My total" : "Total queue"}
             </span>
-            <div className="text-2xl font-bold mt-1">{stats.totalEmails ?? 0}</div>
+            <div className="text-2xl font-bold mt-1">
+              {stats.totalEmails ?? 0}
+            </div>
           </div>
           <div className="bg-slate-900/60 border border-slate-800 p-3 rounded-xl">
             <span className="text-xs text-emerald-400">Sent</span>
@@ -356,20 +393,17 @@ export default function EmailAutomationDashboard() {
         </section>
       )}
 
-      {/* Tabs */}
       <div className="flex flex-wrap gap-2 border-b border-slate-800 px-4 pb-2">
-        {can("compose") && (
-          <button
-            onClick={() => setActiveTab("compose")}
-            className={`px-3 py-1.5 rounded-lg text-sm ${
-              activeTab === "compose"
-                ? "bg-blue-600 text-white"
-                : "bg-slate-800 text-slate-300"
-            }`}
-          >
-            Compose
-          </button>
-        )}
+        <button
+          onClick={() => setActiveTab("compose")}
+          className={`px-3 py-1.5 rounded-lg text-sm ${
+            activeTab === "compose"
+              ? "bg-blue-600 text-white"
+              : "bg-slate-800 text-slate-300"
+          }`}
+        >
+          Compose
+        </button>
         {can("dashboard") && (
           <button
             onClick={() => setActiveTab("dashboard")}
@@ -394,7 +428,10 @@ export default function EmailAutomationDashboard() {
             Sheets
           </button>
         )}
-        {(isSuperAdmin() || can("gmail") || can("smtp_view") || can("smtp_add")) && (
+        {(isSuperAdmin() ||
+          can("gmail") ||
+          can("smtp_view") ||
+          can("smtp_add")) && (
           <button
             onClick={() => setActiveTab("gmail_accounts")}
             className={`px-3 py-1.5 rounded-lg text-sm ${
@@ -406,18 +443,16 @@ export default function EmailAutomationDashboard() {
             SMTP
           </button>
         )}
-        {can("templates") && (
-          <button
-            onClick={() => setActiveTab("templates")}
-            className={`px-3 py-1.5 rounded-lg text-sm ${
-              activeTab === "templates"
-                ? "bg-blue-600 text-white"
-                : "bg-slate-800 text-slate-300"
-            }`}
-          >
-            Templates
-          </button>
-        )}
+        <button
+          onClick={() => setActiveTab("templates")}
+          className={`px-3 py-1.5 rounded-lg text-sm ${
+            activeTab === "templates"
+              ? "bg-blue-600 text-white"
+              : "bg-slate-800 text-slate-300"
+          }`}
+        >
+          Templates
+        </button>
         {can("campaigns") && (
           <button
             onClick={() => setActiveTab("campaigns_tab")}
@@ -445,24 +480,26 @@ export default function EmailAutomationDashboard() {
       </div>
 
       <main className="p-4 space-y-4">
-        {activeTab === "compose" && can("compose") && (
-          <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
-            <h2 className="font-semibold mb-2">Compose Email</h2>
+        {activeTab === "compose" && (
+          <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4 space-y-3">
+            <h2 className="font-semibold">Compose Email</h2>
             <p className="text-sm text-slate-400">
-              Full composer UI is available. Use Templates tab for HTML bodies,
-              then send from queue or manual flow.
+              Logged in as{" "}
+              <strong className="text-white">{authUser.username}</strong>
+              {" · "}Access:{" "}
+              <span className="text-blue-400">{perms.join(", ")}</span>
             </p>
-            <RichTextComposer
-              value=""
-              onChange={() => {}}
-            />
+            <RichTextComposer value="" onChange={() => {}} />
           </div>
         )}
 
-        {activeTab === "dashboard" && can("dashboard") && (
+        {activeTab === "dashboard" && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
-              <h2 className="font-semibold">Live Queue & Opens</h2>
+              <h2 className="font-semibold">
+                Live Queue{" "}
+                {stats.scope === "own" ? "(your sends)" : "(all)"}
+              </h2>
               <button
                 onClick={loadDashboardData}
                 className="text-sm px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 flex items-center gap-1"
@@ -483,17 +520,25 @@ export default function EmailAutomationDashboard() {
                 <tbody>
                   {queueItems.length === 0 ? (
                     <tr>
-                      <td colSpan={4} className="p-4 text-slate-500 text-center">
-                        No queue items
+                      <td
+                        colSpan={4}
+                        className="p-4 text-slate-500 text-center"
+                      >
+                        No queue items yet
                       </td>
                     </tr>
                   ) : (
                     queueItems.map((item: any) => (
-                      <tr key={item.id} className="border-t border-slate-800">
+                      <tr
+                        key={item.id}
+                        className="border-t border-slate-800"
+                      >
                         <td className="p-2">{item.email}</td>
                         <td className="p-2">{item.status}</td>
                         <td className="p-2">{item.openCount ?? 0}</td>
-                        <td className="p-2 text-slate-400">{item.referenceNo}</td>
+                        <td className="p-2 text-slate-400">
+                          {item.referenceNo}
+                        </td>
                       </tr>
                     ))
                   )}
@@ -504,11 +549,11 @@ export default function EmailAutomationDashboard() {
               <h3 className="font-medium text-sm text-slate-300 mb-2">
                 Recent Opens
               </h3>
-              <div className="space-y-1">
-                {recentOpens.length === 0 ? (
-                  <p className="text-slate-500 text-sm">No opens yet</p>
-                ) : (
-                  recentOpens.map((op: any) => (
+              {recentOpens.length === 0 ? (
+                <p className="text-slate-500 text-sm">No opens yet</p>
+              ) : (
+                <div className="space-y-1">
+                  {recentOpens.map((op: any) => (
                     <div
                       key={op.id}
                       className="text-sm border border-slate-800 rounded-lg p-2 flex justify-between"
@@ -525,10 +570,38 @@ export default function EmailAutomationDashboard() {
                           : ""}
                       </span>
                     </div>
-                  ))
-                )}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
+          </div>
+        )}
+
+        {activeTab === "templates" && (
+          <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
+            <h2 className="font-semibold mb-2">Templates</h2>
+            <p className="text-sm text-slate-400">
+              Template studio — you have templates access.
+            </p>
+          </div>
+        )}
+
+        {activeTab === "sheets_importer" && can("sheets") && (
+          <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
+            <h2 className="font-semibold">Google Sheets / Import</h2>
+          </div>
+        )}
+
+        {activeTab === "gmail_accounts" &&
+          (isSuperAdmin() || can("gmail") || can("smtp_view")) && (
+            <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
+              <h2 className="font-semibold">SMTP Accounts</h2>
+            </div>
+          )}
+
+        {activeTab === "campaigns_tab" && can("campaigns") && (
+          <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
+            <h2 className="font-semibold">Campaigns</h2>
           </div>
         )}
 
@@ -537,49 +610,31 @@ export default function EmailAutomationDashboard() {
             <h2 className="font-semibold mb-3 flex items-center gap-2">
               <Users className="h-4 w-4" /> Users / Operators
             </h2>
-            <p className="text-xs text-slate-500 mb-3">
-              Super Admin can grant any permissions to operators. Operators only
-              see their own sent/opens stats.
-            </p>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="text-slate-400">
-                  <tr>
-                    <th className="text-left p-2">User</th>
-                    <th className="text-left p-2">Role</th>
-                    <th className="text-left p-2">Sent</th>
-                    <th className="text-left p-2">Permissions</th>
+            <table className="w-full text-sm">
+              <thead className="text-slate-400">
+                <tr>
+                  <th className="text-left p-2">User</th>
+                  <th className="text-left p-2">Role</th>
+                  <th className="text-left p-2">Sent today</th>
+                  <th className="text-left p-2">Permissions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {adminUsers.map((u: any) => (
+                  <tr key={u.id} className="border-t border-slate-800">
+                    <td className="p-2">{u.username}</td>
+                    <td className="p-2">{u.role}</td>
+                    <td className="p-2 text-emerald-400">
+                      {u.sentToday ?? 0}
+                    </td>
+                    <td className="p-2 text-xs text-slate-400">
+                      {(u.permissions || []).join(", ") || "defaults"}
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
-                  {adminUsers.map((u: any) => (
-                    <tr key={u.id} className="border-t border-slate-800">
-                      <td className="p-2">{u.username}</td>
-                      <td className="p-2">{u.role}</td>
-                      <td className="p-2 text-emerald-400">{u.sentToday ?? 0}</td>
-                      <td className="p-2 text-xs text-slate-400">
-                        {(u.permissions || []).join(", ") || "defaults"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                ))}
+              </tbody>
+            </table>
           </div>
-        )}
-
-        {activeTab === "sheets_importer" && can("sheets") && (
-          <div className="text-slate-400 text-sm">Google Sheets / import panel</div>
-        )}
-        {activeTab === "gmail_accounts" &&
-          (isSuperAdmin() || can("gmail") || can("smtp_view")) && (
-            <div className="text-slate-400 text-sm">SMTP / Gmail accounts panel</div>
-          )}
-        {activeTab === "templates" && can("templates") && (
-          <div className="text-slate-400 text-sm">HTML Templates Studio</div>
-        )}
-        {activeTab === "campaigns_tab" && can("campaigns") && (
-          <div className="text-slate-400 text-sm">Campaigns panel</div>
         )}
       </main>
     </div>
