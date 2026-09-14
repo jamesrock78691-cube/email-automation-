@@ -44,8 +44,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Guard: if body still looks like escaped tags, refuse so we never send "plain looking" HTML
-    if (/<[a-zA-Z]|&#0*60;|&lt;/i.test(emailHtml.slice(0, 500))) {
+    // Guard: only reject HTML that is still entity-escaped (would render as visible tags)
+    const head = emailHtml.slice(0, 800);
+    const looksEscaped =
+      head.includes("<") ||
+      head.includes("&#60;") ||
+      head.includes("&#x3c;") ||
+      /&#0*60;/i.test(head);
+    if (looksEscaped) {
       return NextResponse.json(
         {
           success: false,
@@ -68,7 +74,6 @@ export async function POST(request: NextRequest) {
     }
 
     if (!account) {
-      // Prefer enabled accounts under daily limit
       const accounts = await db
         .select()
         .from(gmailAccounts)
@@ -77,7 +82,6 @@ export async function POST(request: NextRequest) {
 
       const now = new Date();
       for (const acc of accounts) {
-        // daily reset
         if (shouldResetDailyQuota(acc.lastUsedAt)) {
           await db
             .update(gmailAccounts)
@@ -116,8 +120,6 @@ export async function POST(request: NextRequest) {
       `[MANUAL SEND] trackingId=${trackingId} pixelBase=${pixelBase} htmlHasPixel=${htmlWithPixel.includes("/api/track/")}`
     );
 
-    // PURE HTML only — no text alternative.
-    // Multipart text+html lets some clients (and some providers) prefer plain text.
     await transporter.sendMail({
       from: `"${displayName}" <${displayFrom}>`,
       replyTo: replyTo || account.replyToEmail || displayFrom,
@@ -126,7 +128,6 @@ export async function POST(request: NextRequest) {
       bcc: bcc || undefined,
       subject,
       html: htmlWithPixel,
-      // intentionally NO text: field
     });
 
     const cooldownUntil = new Date();
@@ -161,7 +162,6 @@ export async function POST(request: NextRequest) {
         sentAt: new Date().toISOString(),
         sentBy: sentByUsername || "",
       };
-      // Keep map bounded (~500 entries)
       const keys = Object.keys(map);
       if (keys.length > 500) {
         for (const k of keys.slice(0, keys.length - 500)) delete map[k];
