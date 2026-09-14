@@ -32,7 +32,6 @@ export function compileTemplate(
   return result;
 }
 
-// ===== Error classifier =====
 function classifyError(errorMessage: string): {
   type: "auth" | "rate_limit" | "permanent" | "temporary";
   shouldDisableAccount: boolean;
@@ -41,7 +40,6 @@ function classifyError(errorMessage: string): {
 } {
   const msg = (errorMessage || "").toLowerCase();
 
-  // Transient / policy / connection — NEVER disable the SMTP id
   if (
     msg.includes("daily user sending limit") ||
     msg.includes("daily sending limit") ||
@@ -75,7 +73,6 @@ function classifyError(errorMessage: string): {
     };
   }
 
-  // Auth-looking errors (535 etc) are often temporary on Brevo — cooldown only
   if (
     msg.includes("invalid login") ||
     msg.includes("authentication failed") ||
@@ -92,7 +89,6 @@ function classifyError(errorMessage: string): {
     };
   }
 
-  // Permanent recipient / content errors
   if (
     msg.includes("user unknown") ||
     msg.includes("mailbox not found") ||
@@ -112,7 +108,6 @@ function classifyError(errorMessage: string): {
     };
   }
 
-  // Default = temporary
   return {
     type: "temporary",
     shouldDisableAccount: false,
@@ -121,14 +116,8 @@ function classifyError(errorMessage: string): {
   };
 }
 
-// ===== Exponential backoff (seconds) =====
 function getBackoffSeconds(tries: number): number {
-  // try 1 → 30s, try 2 → 120s, try 3 → 300s
-  const map: Record<number, number> = {
-    1: 30,
-    2: 120,
-    3: 300,
-  };
+  const map: Record<number, number> = { 1: 30, 2: 120, 3: 300 };
   return map[tries] || 600;
 }
 
@@ -138,7 +127,6 @@ export async function processNextQueueItem(
   const now = new Date();
   const todayLocal = now.toLocaleDateString("en-CA");
 
-  // 1. Get next eligible pending email
   const pendingItems = await db
     .select()
     .from(queue)
@@ -171,23 +159,20 @@ export async function processNextQueueItem(
     item.trackingId = trackingId;
   }
 
-  // Prefer stable production base URL for pixel (avoid dead preview hosts)
+  // Always prefer stable production URL for tracking pixel
+  // (request host can be a short-lived Vercel preview → opens never hit prod)
   const pixelBase =
-    (baseUrl && !/localhost|127\.0\.0\.1/i.test(baseUrl) ? baseUrl : "") ||
-    getAppBaseUrl();
+    getAppBaseUrl() ||
+    (baseUrl && !/localhost|127\.0\.0\.1/i.test(baseUrl) ? baseUrl : "");
 
-  // 2. Load accounts (include disabled so we can auto-revive after cooldown)
   const accounts = await db.select().from(gmailAccounts);
 
-  // 3. Daily + Minute reset (calendar day + rolling minute)
   for (const acc of accounts) {
     const updates: any = {};
     let needsUpdate = false;
 
     if (acc.lastUsedAt) {
-      const lastUsedLocal = new Date(acc.lastUsedAt).toLocaleDateString(
-        "en-CA"
-      );
+      const lastUsedLocal = new Date(acc.lastUsedAt).toLocaleDateString("en-CA");
       if (lastUsedLocal !== todayLocal) {
         updates.sentToday = 0;
         needsUpdate = true;
@@ -209,7 +194,6 @@ export async function processNextQueueItem(
       needsUpdate = true;
     }
 
-    // Clear expired cooldown timestamps. Never auto-enable a manually disabled SMTP.
     if (acc.cooldownUntil && acc.cooldownUntil <= now) {
       updates.cooldownUntil = null;
       needsUpdate = true;
@@ -236,7 +220,6 @@ export async function processNextQueueItem(
     }
   }
 
-  // 4. Healthy accounts filter
   const healthyAccounts = accounts.filter((acc) => {
     if (acc.status && acc.status !== "enabled") return false;
     if (acc.cooldownUntil && acc.cooldownUntil > now) return false;
@@ -246,7 +229,6 @@ export async function processNextQueueItem(
   });
 
   if (healthyAccounts.length === 0) {
-    // No account available → schedule this item later, but do not hard-fail
     const retryAfter = new Date();
     retryAfter.setMinutes(retryAfter.getMinutes() + 5);
 
@@ -268,7 +250,6 @@ export async function processNextQueueItem(
     };
   }
 
-  // Health-aware sort: high priority, low errorCount, least recently used
   healthyAccounts.sort((a, b) => {
     if (b.priority !== a.priority) return b.priority - a.priority;
     if ((a.errorCount || 0) !== (b.errorCount || 0))
@@ -278,7 +259,6 @@ export async function processNextQueueItem(
     return aTime - bTime;
   });
 
-  // 5. Prepare email content
   const todayStr = now.toLocaleDateString("en-US", {
     weekday: "long",
     year: "numeric",
@@ -304,7 +284,6 @@ export async function processNextQueueItem(
 
   let rawHtml = "";
 
-  // Resolve template: queue.templateId → else campaign.templateId
   let resolvedTemplateId = item.templateId || null;
   if (!resolvedTemplateId && item.campaignId) {
     const camp = await db
@@ -379,7 +358,6 @@ export async function processNextQueueItem(
     console.error("Attachment parse error", err);
   }
 
-  // 6. Mark sending
   await db
     .update(queue)
     .set({
@@ -390,37 +368,29 @@ export async function processNextQueueItem(
 
   const currentTries = item.tries + 1;
 
-  // 7. Try accounts (rotation: each account up to 3 attempts, then next)
   let transportSuccess = false;
   let transportError = "";
   let finalUsedAccount: any = null;
   let lastClassified: ReturnType<typeof classifyError> | null = null;
 
   for (const account of healthyAccounts) {
-    let accountGaveUp = false;
-
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         const transporter = createSmtpTransport(account);
 
-        // PURE HTML only — no text alternative so clients cannot pick plain text
         await transporter.sendMail({
           from: `"${account.senderName}" <${smtpFromAddress(account)}>`,
-          replyTo:
-            account.replyToEmail ||
-            smtpFromAddress(account),
+          replyTo: account.replyToEmail || smtpFromAddress(account),
           to: item.email,
           cc: item.cc || undefined,
           bcc: item.bcc || undefined,
           subject: compiledSubject,
           html: finalHtml,
-          // intentionally NO text: field
           attachments: attachmentsList,
         });
 
         transportSuccess = true;
         finalUsedAccount = account;
-        accountGaveUp = false;
         break;
       } catch (err: any) {
         transportError = err?.message || String(err);
@@ -460,38 +430,19 @@ export async function processNextQueueItem(
           .set(accUpdate)
           .where(eq(gmailAccounts.id, account.id));
 
-        // Permanent recipient errors: stop this SMTP; auth/rate: leave account this round
-        if (classified.type === "permanent") {
-          accountGaveUp = true;
-          break;
-        }
-        if (classified.type === "auth" || classified.type === "rate_limit") {
-          accountGaveUp = true;
-          break;
-        }
+        if (classified.type === "permanent") break;
+        if (classified.type === "auth" || classified.type === "rate_limit") break;
+        if (classified.isDailyLimit) break;
+        if (attempt >= 3) break;
 
-        // Daily limit → leave this account immediately and try next SMTP
-        if (classified.isDailyLimit) {
-          accountGaveUp = true;
-          break;
-        }
-
-        if (attempt >= 3) {
-          accountGaveUp = true;
-          break; // 3 failures → next SMTP
-        }
-
-        // brief pause before retry same account
         await new Promise((r) => setTimeout(r, 1000));
       }
     }
 
     if (transportSuccess) break;
-    // If permanent on this recipient, no point trying other SMTPs
     if (lastClassified?.type === "permanent") break;
   }
 
-  // 8. Success
   if (transportSuccess && finalUsedAccount) {
     const cooldownUntil = new Date();
     cooldownUntil.setSeconds(cooldownUntil.getSeconds() + 15);
@@ -547,11 +498,9 @@ export async function processNextQueueItem(
     };
   }
 
-  // 9. All failed / permanent fail
   const classified = lastClassified || classifyError(transportError);
   const maxTries = item.maxTries || 3;
 
-  // Permanent error → failed immediately
   if (!classified.retryable || classified.type === "permanent") {
     await db
       .update(queue)
@@ -570,7 +519,6 @@ export async function processNextQueueItem(
     };
   }
 
-  // Max tries reached
   if (currentTries >= maxTries) {
     await db
       .update(queue)
@@ -589,7 +537,6 @@ export async function processNextQueueItem(
     };
   }
 
-  // Temporary / rate_limit → schedule retry with backoff
   const backoffSec = getBackoffSeconds(currentTries);
   const retryAfter = new Date();
   retryAfter.setSeconds(retryAfter.getSeconds() + backoffSec);
