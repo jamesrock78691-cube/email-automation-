@@ -13,55 +13,26 @@ import {
 } from "@/lib/trackingPixel";
 import { smtpFromAddress, createSmtpTransport } from "@/lib/smtpAccount";
 
-async function getSmtpAssignments(): Promise<Record<string, number[]>> {
-  try {
-    const rows = await db
-      .select()
-      .from(settings)
-      .where(eq(settings.key, "smtp_assignments"))
-      .limit(1);
-    if (!rows.length || !rows[0].value) return {};
-    const parsed = JSON.parse(rows[0].value);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function accountAllowedForUser(
-  accountId: number,
-  userId: number | null | undefined,
-  isSuper: boolean,
-  map: Record<string, number[]>
-): boolean {
-  if (isSuper) return true;
-  const assigned = map[String(accountId)] || [];
-  if (assigned.length === 0) return true;
-  if (userId == null) return false;
-  return assigned.map(Number).includes(Number(userId));
-}
-
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-
     const {
-      fromName,
-      fromEmail,
       to,
-      cc,
-      bcc,
-      replyTo,
       subject,
       html,
-      smtpAccountId,
+      cc,
+      bcc,
+      fromName,
+      fromEmail,
+      replyTo,
       referenceNo,
       serialNo,
       markName,
       filingDate,
       templateName,
-      sentByUserId,
       sentByUsername,
+      sentByUserId,
+      smtpAccountId,
     } = body;
 
     const emailHtml = toSendableEmailHtml(String(html || ""));
@@ -74,120 +45,55 @@ export async function POST(request: NextRequest) {
     }
 
     // Guard: if body still looks like escaped tags, refuse so we never send "plain looking" HTML
-    if (/&lt;[a-zA-Z]|&#0*60;|&amp;lt;/i.test(emailHtml.slice(0, 500))) {
-      console.error(
-        "manual-send: HTML still entity-escaped after toSendableEmailHtml",
-        emailHtml.slice(0, 200)
-      );
-    }
-
-    let account: any = null;
-    const now = new Date();
-    const assignMap = await getSmtpAssignments();
-    const uid =
-      sentByUserId != null && sentByUserId !== ""
-        ? Number(sentByUserId)
-        : null;
-    const userIdNum = uid != null && !Number.isNaN(uid) ? uid : null;
-    const isSuper =
-      String(body.isSuperAdmin || "") === "true" ||
-      String(body.role || "").toLowerCase() === "super_admin";
-
-    // Apply PKT 07:00 daily reset before limit checks (lazy reset)
-    async function applyDailyReset(acc: any): Promise<any> {
-      if (!acc) return acc;
-      if (!shouldResetDailyQuota(acc.lastUsedAt, now)) return acc;
-      await db
-        .update(gmailAccounts)
-        .set({ sentToday: 0 })
-        .where(eq(gmailAccounts.id, acc.id));
-      return { ...acc, sentToday: 0 };
-    }
-
-    if (smtpAccountId) {
-      const rows = await db
-        .select()
-        .from(gmailAccounts)
-        .where(
-          and(
-            eq(gmailAccounts.id, Number(smtpAccountId)),
-            eq(gmailAccounts.status, "enabled")
-          )
-        )
-        .limit(1);
-      account = rows[0] || null;
-      if (
-        account &&
-        !accountAllowedForUser(account.id, userIdNum, isSuper, assignMap)
-      ) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: "No SMTP accounts assigned to you. Contact Super Admin.",
-          },
-          { status: 403 }
-        );
-      }
-      account = await applyDailyReset(account);
-      if (
-        account &&
-        (account.cooldownUntil && account.cooldownUntil > now
-          ? true
-          : (account.sentToday || 0) >= (account.dailyLimit || 500))
-      ) {
-        // keep account but fail below if over limit / cooldown
-      }
-    } else {
-      const rows = await db
-        .select()
-        .from(gmailAccounts)
-        .where(eq(gmailAccounts.status, "enabled"))
-        .orderBy(desc(gmailAccounts.priority));
-
-      const allowed = rows.filter((a) =>
-        accountAllowedForUser(a.id, userIdNum, isSuper, assignMap)
-      );
-
-      if (allowed.length === 0 && rows.length > 0) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: "No SMTP accounts assigned to you. Contact Super Admin.",
-          },
-          { status: 403 }
-        );
-      }
-
-      // Reset each candidate so limit check uses today's quota day (07:00 PKT)
-      const refreshed: any[] = [];
-      for (const a of allowed) {
-        refreshed.push(await applyDailyReset(a));
-      }
-
-      account =
-        refreshed.find(
-          (a) =>
-            (!a.cooldownUntil || a.cooldownUntil <= now) &&
-            (a.sentToday || 0) < (a.dailyLimit || 500)
-        ) || null;
-    }
-
-    if (!account) {
+    if (/<[a-zA-Z]|&#0*60;|&lt;/i.test(emailHtml.slice(0, 500))) {
       return NextResponse.json(
         {
           success: false,
           error:
-            "No available SMTP account (all disabled, cooldown, or daily limit reached).",
+            "HTML appears escaped (tags show as text). Re-compose or fix the template.",
         },
         { status: 400 }
       );
     }
 
-    // Explicit single-account path: still enforce limit after reset
-    if (
-      (account.cooldownUntil && account.cooldownUntil > now) ||
-      (account.sentToday || 0) >= (account.dailyLimit || 500)
-    ) {
+    // Pick SMTP account
+    let account: any = null;
+    if (smtpAccountId) {
+      const rows = await db
+        .select()
+        .from(gmailAccounts)
+        .where(eq(gmailAccounts.id, Number(smtpAccountId)))
+        .limit(1);
+      account = rows[0] || null;
+    }
+
+    if (!account) {
+      // Prefer enabled accounts under daily limit
+      const accounts = await db
+        .select()
+        .from(gmailAccounts)
+        .where(eq(gmailAccounts.status, "enabled"))
+        .orderBy(desc(gmailAccounts.priority));
+
+      const now = new Date();
+      for (const acc of accounts) {
+        // daily reset
+        if (shouldResetDailyQuota(acc.lastUsedAt)) {
+          await db
+            .update(gmailAccounts)
+            .set({ sentToday: 0, sentThisMinute: 0 })
+            .where(eq(gmailAccounts.id, acc.id));
+          acc.sentToday = 0;
+          acc.sentThisMinute = 0;
+        }
+        if (acc.cooldownUntil && new Date(acc.cooldownUntil) > now) continue;
+        if ((acc.sentToday || 0) >= (acc.dailyLimit || 500)) continue;
+        account = acc;
+        break;
+      }
+    }
+
+    if (!account) {
       return NextResponse.json(
         {
           success: false,
@@ -203,8 +109,12 @@ export async function POST(request: NextRequest) {
     const displayFrom = fromEmail || smtpFromAddress(account);
     const displayName = fromName || account.senderName || account.email;
     const trackingId = randomUUID();
-    const pixel = buildTrackingPixelHtml(getAppBaseUrl(request), trackingId);
+    const pixelBase = getAppBaseUrl(request);
+    const pixel = buildTrackingPixelHtml(pixelBase, trackingId);
     const htmlWithPixel = injectTrackingPixel(emailHtml, pixel);
+    console.log(
+      `[MANUAL SEND] trackingId=${trackingId} pixelBase=${pixelBase} htmlHasPixel=${htmlWithPixel.includes("/api/track/")}`
+    );
 
     // PURE HTML only — no text alternative.
     // Multipart text+html lets some clients (and some providers) prefer plain text.
@@ -232,6 +142,44 @@ export async function POST(request: NextRequest) {
         errorCount: 0,
       })
       .where(eq(gmailAccounts.id, account.id));
+
+    // Persist trackingId → email in DB so pixel opens count without Google Sheets
+    try {
+      const mapRows = await db
+        .select()
+        .from(settings)
+        .where(eq(settings.key, "manual_track_map"))
+        .limit(1);
+      const map = mapRows.length
+        ? JSON.parse(mapRows[0].value || "{}")
+        : {};
+      map[trackingId] = {
+        email: to,
+        subject: subject || "",
+        markName: markName || "Manual Send",
+        referenceNo: referenceNo || "MANUAL",
+        sentAt: new Date().toISOString(),
+        sentBy: sentByUsername || "",
+      };
+      // Keep map bounded (~500 entries)
+      const keys = Object.keys(map);
+      if (keys.length > 500) {
+        for (const k of keys.slice(0, keys.length - 500)) delete map[k];
+      }
+      if (mapRows.length) {
+        await db
+          .update(settings)
+          .set({ value: JSON.stringify(map) })
+          .where(eq(settings.key, "manual_track_map"));
+      } else {
+        await db.insert(settings).values({
+          key: "manual_track_map",
+          value: JSON.stringify(map),
+        });
+      }
+    } catch (mapErr) {
+      console.error("manual_track_map save failed:", mapErr);
+    }
 
     try {
       await appendManualSentLog({
