@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { queue, trackingLogs } from "@/db/schema";
+import { queue, trackingLogs, settings } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import {
   recordOpenOnAutoSheet,
@@ -13,6 +13,8 @@ const TRANSPARENT_PNG = Buffer.from(
   "base64"
 );
 
+const MANUAL_MAP_KEY = "manual_track_map";
+
 function pixelResponse() {
   return new NextResponse(TRANSPARENT_PNG, {
     status: 200,
@@ -22,7 +24,6 @@ function pixelResponse() {
       "Cache-Control": "no-store, no-cache, must-revalidate, private, max-age=0",
       Pragma: "no-cache",
       Expires: "0",
-      // Allow embedding from any mail client / proxy
       "Access-Control-Allow-Origin": "*",
       "X-Content-Type-Options": "nosniff",
     },
@@ -47,13 +48,33 @@ function parseClient(request: NextRequest) {
     browser = "Internet Explorer";
 
   let device = "Desktop";
-  if (
-    /Mobile|Android|iPhone|iPad|iPod/i.test(userAgent)
-  ) {
+  if (/Mobile|Android|iPhone|iPad|iPod/i.test(userAgent)) {
     device = "Mobile";
   }
 
   return { userAgent, ipAddress, browser, device };
+}
+
+async function lookupManualMap(trackingId: string): Promise<{
+  email?: string;
+  markName?: string;
+  referenceNo?: string;
+  subject?: string;
+} | null> {
+  try {
+    const rows = await db
+      .select()
+      .from(settings)
+      .where(eq(settings.key, MANUAL_MAP_KEY))
+      .limit(1);
+    if (!rows.length) return null;
+    const map = JSON.parse(rows[0].value || "{}");
+    const entry = map[trackingId];
+    if (!entry || typeof entry !== "object") return null;
+    return entry;
+  } catch {
+    return null;
+  }
 }
 
 export async function GET(
@@ -69,7 +90,6 @@ export async function GET(
     } catch {
       // keep raw
     }
-    // strip optional query junk if somehow in path
     trackingId = trackingId.split("?")[0].split("&")[0].trim();
 
     if (!trackingId) return pixelResponse();
@@ -87,26 +107,34 @@ export async function GET(
     if (matchedQueue.length > 0) {
       const qItem = matchedQueue[0];
 
-      await db
-        .update(queue)
-        .set({
-          openCount: (qItem.openCount || 0) + 1,
-          lastOpenedAt: openedAt,
-        })
-        .where(eq(queue.id, qItem.id));
+      try {
+        await db
+          .update(queue)
+          .set({
+            openCount: (qItem.openCount || 0) + 1,
+            lastOpenedAt: openedAt,
+          })
+          .where(eq(queue.id, qItem.id));
+      } catch (e) {
+        console.error("queue openCount update failed:", e);
+      }
 
-      await db.insert(trackingLogs).values({
-        queueId: qItem.id,
-        trackingId,
-        ipAddress,
-        userAgent,
-        browser,
-        device,
-        openedAt,
-        email: qItem.email || null,
-        markName: qItem.markName || null,
-        referenceNo: qItem.referenceNo || null,
-      });
+      try {
+        await db.insert(trackingLogs).values({
+          queueId: qItem.id,
+          trackingId,
+          ipAddress,
+          userAgent,
+          browser,
+          device,
+          openedAt,
+          email: qItem.email || null,
+          markName: qItem.markName || null,
+          referenceNo: qItem.referenceNo || null,
+        });
+      } catch (e) {
+        console.error("trackingLogs insert (queue) failed:", e);
+      }
 
       recordOpenOnAutoSheet(trackingId, openedAtIso).catch((err) =>
         console.error("auto sheet open update failed:", err)
@@ -117,29 +145,45 @@ export async function GET(
       let manualMark: string | null = null;
       let manualRef: string | null = null;
 
+      // 1) Fast path: DB settings map written at send time
+      const fromMap = await lookupManualMap(trackingId);
+      if (fromMap) {
+        manualEmail = fromMap.email || null;
+        manualMark = fromMap.markName || "Manual Send";
+        manualRef = fromMap.referenceNo || "MANUAL";
+      }
+
+      // 2) Google Sheet (async-safe, may be slow / missing)
       try {
         const sheetRes = await recordOpenOnManualSheet(trackingId, openedAtIso);
         if (sheetRes?.success) {
-          manualEmail = (sheetRes as any).email || null;
-          manualMark = (sheetRes as any).markName || null;
-          manualRef = (sheetRes as any).referenceNo || null;
+          manualEmail = (sheetRes as any).email || manualEmail;
+          manualMark =
+            (sheetRes as any).markName || manualMark || "Manual Send";
+          manualRef =
+            (sheetRes as any).referenceNo || manualRef || "MANUAL";
         }
       } catch (err) {
         console.error("manual sheet open update failed:", err);
       }
 
-      await db.insert(trackingLogs).values({
-        queueId: null,
-        trackingId,
-        ipAddress,
-        userAgent,
-        browser,
-        device,
-        openedAt,
-        email: manualEmail,
-        markName: manualMark || "Manual Send",
-        referenceNo: manualRef || "MANUAL",
-      });
+      // Always log open — Unique Opens card reads tracking_logs
+      try {
+        await db.insert(trackingLogs).values({
+          queueId: null,
+          trackingId,
+          ipAddress,
+          userAgent,
+          browser,
+          device,
+          openedAt,
+          email: manualEmail,
+          markName: manualMark || "Manual Send",
+          referenceNo: manualRef || "MANUAL",
+        });
+      } catch (e) {
+        console.error("trackingLogs insert (manual) failed:", e);
+      }
     }
 
     console.log(
@@ -152,7 +196,6 @@ export async function GET(
   return pixelResponse();
 }
 
-// HEAD support (some clients probe)
 export async function HEAD(
   request: NextRequest,
   context: { params: Promise<{ trackingId: string }> }
