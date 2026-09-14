@@ -44,7 +44,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Pick SMTP account
     let account: any = null;
     if (smtpAccountId) {
       const rows = await db
@@ -96,7 +95,7 @@ export async function POST(request: NextRequest) {
     const displayName = fromName || account.senderName || account.email;
     const trackingId = randomUUID();
     const pixelBase = getAppBaseUrl(request);
-    const pixel = buildTrackingPixelHtml(pixelBase, trackingId);
+    const pixel = buildTrackingPixelHtml(pixelBase, trackingId, to);
     const htmlWithPixel = injectTrackingPixel(emailHtml, pixel);
     console.log(
       `[MANUAL SEND] trackingId=${trackingId} pixelBase=${pixelBase} htmlHasPixel=${htmlWithPixel.includes("/api/track/")}`
@@ -126,7 +125,6 @@ export async function POST(request: NextRequest) {
       })
       .where(eq(gmailAccounts.id, account.id));
 
-    // Persist trackingId → email in DB so pixel opens count without Google Sheets
     try {
       const mapRows = await db
         .select()
