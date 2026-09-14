@@ -27,7 +27,6 @@ export function getAppBaseUrl(request?: { headers?: Headers }): string {
     "";
   const proto = request?.headers?.get("x-forwarded-proto") || "https";
   if (host && !/localhost|127\.0\.0\.1/i.test(host)) {
-    // Skip Vercel preview deployment hosts (*.vercel.app with hash) when production is known
     return `${proto}://${host}`.replace(/\/$/, "");
   }
 
@@ -43,13 +42,28 @@ export function buildTrackingPixelHtml(
   baseUrl: string,
   trackingId: string
 ): string {
-  let origin = String(baseUrl || "")
+  // ALWAYS use stable production origin for open tracking.
+  // Never embed localhost / preview / wrong host — those opens never hit prod DB.
+  let origin = PRODUCTION_FALLBACK;
+  const envUrl = (
+    process.env.NEXT_PUBLIC_APP_URL ||
+    process.env.APP_URL ||
+    ""
+  )
     .trim()
     .replace(/\/$/, "");
-  if (!origin || /localhost|127\.0\.0\.1/i.test(origin)) {
-    origin = PRODUCTION_FALLBACK;
+  if (envUrl && !/localhost|127\.0\.0\.1/i.test(envUrl)) {
+    origin = envUrl;
+  } else if (baseUrl) {
+    const b = String(baseUrl).trim().replace(/\/$/, "");
+    if (
+      b &&
+      !/localhost|127\.0\.0\.1/i.test(b) &&
+      !/-[a-z0-9]+-[a-z0-9]+\.vercel\.app/i.test(b)
+    ) {
+      origin = /^https?:\/\//i.test(b) ? b : `https://${b}`;
+    }
   }
-  // Ensure https
   if (!/^https?:\/\//i.test(origin)) {
     origin = `https://${origin}`;
   }
@@ -57,16 +71,13 @@ export function buildTrackingPixelHtml(
   const id = encodeURIComponent(String(trackingId || "").trim());
   if (!id) return "";
 
-  // Cache-buster: use tracking id so URL is stable per email but unique across emails
-  const src = `${origin}/api/track/${id}?v=2`;
+  // Stable per-email URL (Gmail image proxy caches by URL)
+  const src = `${origin}/api/track/${id}`;
 
-  // Dual format: plain img + table-wrapped img — maximizes client load rate
-  // No display:none, no visibility:hidden, no opacity:0 (those get blocked)
+  // Keep pixel loadable (no display:none / visibility:hidden / opacity:0)
   return (
-    `<div style="line-height:1px;font-size:1px;max-height:1px;overflow:hidden;">` +
     `<img src="${src}" width="1" height="1" border="0" alt="" ` +
-    `style="width:1px;height:1px;border:0;outline:none;display:block;" />` +
-    `</div>`
+    `style="width:1px;height:1px;border:0;outline:none;display:block;max-height:1px;" />`
   );
 }
 
@@ -87,10 +98,7 @@ export function injectTrackingPixel(html: string, pixel: string): string {
     /<div[^>]*>\s*<img[^>]*\/api\/track\/[^>]*>\s*<\/div>/gi,
     ""
   );
-  cleaned = cleaned.replace(
-    /<img[^>]*\/api\/track\/[^>]*>/gi,
-    ""
-  );
+  cleaned = cleaned.replace(/<img[^>]*\/api\/track\/[^>]*>/gi, "");
 
   // Prefer just before </body>
   if (/<\/body\s*>/i.test(cleaned)) {
