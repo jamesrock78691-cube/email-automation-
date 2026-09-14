@@ -44,24 +44,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Guard: only reject HTML that is still entity-escaped (would render as visible tags)
-    const head = emailHtml.slice(0, 800);
-    const looksEscaped =
-      head.includes("<") ||
-      head.includes("&#60;") ||
-      head.includes("&#x3c;") ||
-      /&#0*60;/i.test(head);
-    if (looksEscaped) {
-      return NextResponse.json(
-        {
-          success: false,
-          error:
-            "HTML appears escaped (tags show as text). Re-compose or fix the template.",
-        },
-        { status: 400 }
-      );
-    }
-
     // Pick SMTP account
     let account: any = null;
     if (smtpAccountId) {
