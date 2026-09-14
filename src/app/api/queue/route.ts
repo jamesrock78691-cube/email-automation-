@@ -4,6 +4,7 @@ import { queue, templates, campaigns } from "@/db/schema";
 import { eq, desc } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { processNextQueueItem } from "@/app/services/emailSender";
+import { getAppBaseUrl } from "@/lib/trackingPixel";
 import { importPendingRowsToQueue } from "@/app/services/googleSheets";
 
 export const maxDuration = 60;
@@ -23,9 +24,14 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { action, items, campaignId, templateId } = body;
 
-    const host = request.headers.get("host") || "localhost:3000";
-    const protocol = host.startsWith("localhost") ? "http" : "https";
-    const baseUrl = `${protocol}://${host}`;
+    // Stable public URL for open-tracking pixels (never bake preview hosts into emails)
+    const baseUrl =
+      getAppBaseUrl(request) ||
+      (() => {
+        const host = request.headers.get("host") || "localhost:3000";
+        const protocol = host.startsWith("localhost") ? "http" : "https";
+        return `${protocol}://${host}`;
+      })();
 
     if (action === "process_next") {
       const result = await processNextQueueItem(baseUrl);
@@ -59,9 +65,9 @@ export async function POST(request: NextRequest) {
         const validTemplateIds = new Set(allTemplates.map((t) => t.id));
         const firstTemplate = allTemplates[0] || null;
         const forcedTemplateId =
-  templateId != null && templateId !== ""
-    ? Number(templateId)
-    : null;
+          templateId != null && templateId !== ""
+            ? Number(templateId)
+            : null;
 
         let validCampaignId: number | null = null;
         let campaignTemplateId: number | null = null;
@@ -81,11 +87,11 @@ export async function POST(request: NextRequest) {
         }
 
         const fallbackTemplateId =
-  (forcedTemplateId && validTemplateIds.has(forcedTemplateId)
-    ? forcedTemplateId
-    : null) ??
-  campaignTemplateId ??
-  (firstTemplate ? firstTemplate.id : null);
+          (forcedTemplateId && validTemplateIds.has(forcedTemplateId)
+            ? forcedTemplateId
+            : null) ??
+          campaignTemplateId ??
+          (firstTemplate ? firstTemplate.id : null);
 
         const rows = items
           .filter((it: any) => it?.email && String(it.email).trim())
@@ -143,12 +149,12 @@ export async function POST(request: NextRequest) {
 
       try {
         const forcedId =
-  templateId != null && templateId !== ""
-    ? Number(templateId)
-    : null;
-const result = await importPendingRowsToQueue(
-  forcedId && !Number.isNaN(forcedId) ? forcedId : null
-);
+          templateId != null && templateId !== ""
+            ? Number(templateId)
+            : null;
+        const result = await importPendingRowsToQueue(
+          forcedId && !Number.isNaN(forcedId) ? forcedId : null
+        );
         return NextResponse.json(result);
       } catch (sheetErr: any) {
         return NextResponse.json(
