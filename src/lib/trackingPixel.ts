@@ -1,4 +1,4 @@
-/** Invisible 1x1 open-tracking pixel. Compatible with Gmail / Outlook / Apple Mail. */
+/** Open-tracking pixel — Gmail / Outlook / Apple Mail friendly. */
 
 const PRODUCTION_FALLBACK = "https://email-automation-ten-mu.vercel.app";
 
@@ -22,7 +22,6 @@ export function getAppBaseUrl(request?: { headers?: Headers }): string {
     "";
   const proto = request?.headers?.get("x-forwarded-proto") || "https";
   if (host && !/localhost|127\.0\.0\.1/i.test(host)) {
-    // Skip ephemeral Vercel preview hosts (…-hash-…vercel.app)
     if (!/^[a-z0-9-]+-[a-z0-9]{8,}-[a-z0-9-]+\.vercel\.app$/i.test(host)) {
       return `${proto}://${host}`.replace(/\/$/, "");
     }
@@ -31,8 +30,7 @@ export function getAppBaseUrl(request?: { headers?: Headers }): string {
   return PRODUCTION_FALLBACK;
 }
 
-function resolvePixelOrigin(baseUrl?: string): string {
-  // 1) Explicit env
+function resolvePixelOrigin(_baseUrl?: string): string {
   const envUrl = (
     process.env.NEXT_PUBLIC_APP_URL ||
     process.env.APP_URL ||
@@ -43,15 +41,13 @@ function resolvePixelOrigin(baseUrl?: string): string {
   if (envUrl && !/localhost|127\.0\.0\.1/i.test(envUrl)) {
     return /^https?:\/\//i.test(envUrl) ? envUrl : `https://${envUrl}`;
   }
-
-  // 2) Always prefer hard production fallback for pixels baked into emails
-  // (preview / wrong hosts never receive opens in prod DB)
   return PRODUCTION_FALLBACK;
 }
 
 /**
- * Build a 1x1 tracking pixel that email clients actually load.
- * Optional recipientEmail is encoded as ?e= so opens are attributed even without queue/map.
+ * Build a tracking pixel Gmail actually loads.
+ * Uses /p/{id}.png (looks like a normal image, not /api/track).
+ * Injected at TOP of <body> so Gmail "clipped message" still fires the open.
  */
 export function buildTrackingPixelHtml(
   baseUrl: string,
@@ -62,23 +58,25 @@ export function buildTrackingPixelHtml(
   const id = encodeURIComponent(String(trackingId || "").trim());
   if (!id) return "";
 
-  let src = `${origin}/api/track/${id}`;
+  let src = `${origin}/p/${id}.png`;
   const email = String(recipientEmail || "").trim().toLowerCase();
   if (email && email.includes("@")) {
     src += `?e=${encodeURIComponent(email)}`;
   }
 
-  // Loadable pixel — no display:none / visibility:hidden / opacity:0
-  // (many clients skip loading hidden images)
+  // 3x3, table-wrapped, never display:none — Gmail skips hidden 1x1 trackers
   return (
-    `<img src="${src}" width="1" height="1" border="0" alt="" ` +
-    `style="width:1px;height:1px;border:0;outline:none;display:block;max-height:1px;" />`
+    `<table role="presentation" border="0" cellpadding="0" cellspacing="0" ` +
+    `style="border-collapse:collapse;"><tr><td style="font-size:0;line-height:0;">` +
+    `<img src="${src}" width="3" height="3" alt="" border="0" ` +
+    `style="width:3px;height:3px;border:0;display:block;" />` +
+    `</td></tr></table>`
   );
 }
 
 /**
- * Inject pixel once, just before </body> when possible.
- * Strips any previous /api/track/ pixel so domain/email stay correct.
+ * Inject at the START of <body> (Gmail clips the bottom of long trademark emails)
+ * and also before </body> as fallback.
  */
 export function injectTrackingPixel(html: string, pixel: string): string {
   const source = String(html || "");
@@ -87,16 +85,21 @@ export function injectTrackingPixel(html: string, pixel: string): string {
   let cleaned = source.replace(/{{\s*tracking_pixel\s*}}/gi, "");
 
   cleaned = cleaned.replace(
-    /<div[^>]*>\s*<img[^>]*\/api\/track\/[^>]*>\s*<\/div>/gi,
+    /<table[^>]*>\s*<tr>\s*<td[^>]*>\s*<img[^>]*\/(p|api\/track)\/[^>]*>\s*<\/td>\s*<\/tr>\s*<\/table>/gi,
     ""
   );
   cleaned = cleaned.replace(/<img[^>]*\/api\/track\/[^>]*>/gi, "");
+  cleaned = cleaned.replace(/<img[^>]*\/p\/[^>]*\.png[^>]*>/gi, "");
 
+  if (/<body[^>]*>/i.test(cleaned)) {
+    cleaned = cleaned.replace(/<body([^>]*)>/i, `<body$1>${pixel}`);
+    return cleaned;
+  }
   if (/<\/body\s*>/i.test(cleaned)) {
     return cleaned.replace(/<\/body\s*>/i, `${pixel}</body>`);
   }
   if (/<\/html\s*>/i.test(cleaned)) {
     return cleaned.replace(/<\/html\s*>/i, `${pixel}</html>`);
   }
-  return cleaned + pixel;
+  return pixel + cleaned;
 }

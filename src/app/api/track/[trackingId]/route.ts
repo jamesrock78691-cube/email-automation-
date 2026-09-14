@@ -7,6 +7,9 @@ import {
   recordOpenOnManualSheet,
 } from "@/app/services/googleSheets";
 
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
 const TRANSPARENT_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
   "base64"
@@ -25,6 +28,8 @@ function pixelResponse() {
       Expires: "0",
       "Access-Control-Allow-Origin": "*",
       "X-Content-Type-Options": "nosniff",
+      "Content-Disposition": "inline",
+      "Accept-Ranges": "bytes",
     },
   });
 }
@@ -39,7 +44,14 @@ function parseClient(request: NextRequest) {
     "127.0.0.1";
 
   let browser = "Other";
-  if (userAgent.includes("Firefox")) browser = "Firefox";
+  if (
+    userAgent.includes("GoogleImageProxy") ||
+    userAgent.includes("ggpht.com") ||
+    userAgent.includes("via ggpht")
+  )
+    browser = "Gmail";
+  else if (userAgent.includes("Thunderbird")) browser = "Thunderbird";
+  else if (userAgent.includes("Firefox")) browser = "Firefox";
   else if (userAgent.includes("Edg")) browser = "Edge";
   else if (userAgent.includes("Chrome")) browser = "Chrome";
   else if (userAgent.includes("Safari")) browser = "Safari";
@@ -89,6 +101,7 @@ export async function GET(
       // keep raw
     }
     trackingId = trackingId.split("?")[0].split("&")[0].trim();
+    trackingId = trackingId.replace(/\.(png|gif|jpg|jpeg)$/i, "").trim();
 
     if (!trackingId) return pixelResponse();
 
