@@ -7,7 +7,6 @@ import {
   recordOpenOnManualSheet,
 } from "@/app/services/googleSheets";
 
-// 1x1 transparent PNG base64
 const TRANSPARENT_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
   "base64"
@@ -81,7 +80,6 @@ export async function GET(
   request: NextRequest,
   context: { params: Promise<{ trackingId: string }> }
 ) {
-  // Always return the pixel — even if logging fails
   try {
     const raw = (await context.params)?.trackingId || "";
     let trackingId = String(raw).trim();
@@ -93,6 +91,16 @@ export async function GET(
     trackingId = trackingId.split("?")[0].split("&")[0].trim();
 
     if (!trackingId) return pixelResponse();
+
+    // Email baked into pixel URL: /api/track/{id}?e=user@domain.com
+    let emailFromQuery: string | null = null;
+    try {
+      const q = request.nextUrl?.searchParams?.get("e") || "";
+      const e = decodeURIComponent(String(q).trim().toLowerCase());
+      if (e && e.includes("@")) emailFromQuery = e;
+    } catch {
+      emailFromQuery = null;
+    }
 
     const matchedQueue = await db
       .select()
@@ -128,7 +136,7 @@ export async function GET(
           browser,
           device,
           openedAt,
-          email: qItem.email || null,
+          email: qItem.email || emailFromQuery || null,
           markName: qItem.markName || null,
           referenceNo: qItem.referenceNo || null,
         });
@@ -140,20 +148,17 @@ export async function GET(
         console.error("auto sheet open update failed:", err)
       );
     } else {
-      // Manual-send path (no queue row)
-      let manualEmail: string | null = null;
-      let manualMark: string | null = null;
-      let manualRef: string | null = null;
+      let manualEmail: string | null = emailFromQuery;
+      let manualMark: string | null = "Manual Send";
+      let manualRef: string | null = "MANUAL";
 
-      // 1) Fast path: DB settings map written at send time
       const fromMap = await lookupManualMap(trackingId);
       if (fromMap) {
-        manualEmail = fromMap.email || null;
-        manualMark = fromMap.markName || "Manual Send";
-        manualRef = fromMap.referenceNo || "MANUAL";
+        manualEmail = fromMap.email || manualEmail;
+        manualMark = fromMap.markName || manualMark;
+        manualRef = fromMap.referenceNo || manualRef;
       }
 
-      // 2) Google Sheet (async-safe, may be slow / missing)
       try {
         const sheetRes = await recordOpenOnManualSheet(trackingId, openedAtIso);
         if (sheetRes?.success) {
@@ -167,7 +172,6 @@ export async function GET(
         console.error("manual sheet open update failed:", err);
       }
 
-      // Always log open — Unique Opens card reads tracking_logs
       try {
         await db.insert(trackingLogs).values({
           queueId: null,
@@ -187,7 +191,7 @@ export async function GET(
     }
 
     console.log(
-      `[TRACKING PIXEL] Logged open trackId=${trackingId} ip=${ipAddress}`
+      `[TRACKING PIXEL] open trackId=${trackingId} email=${emailFromQuery || "-"} ip=${ipAddress}`
     );
   } catch (error) {
     console.error("Error in open tracking route:", error);
