@@ -148,7 +148,6 @@ export async function processNextQueueItem(
 
   const item = pendingItems[0];
 
-  // Ensure trackingId always exists (older rows / bad imports)
   let trackingId = String(item.trackingId || "").trim();
   if (!trackingId) {
     trackingId = randomUUID();
@@ -159,8 +158,6 @@ export async function processNextQueueItem(
     item.trackingId = trackingId;
   }
 
-  // Always prefer stable production URL for tracking pixel
-  // (request host can be a short-lived Vercel preview → opens never hit prod)
   const pixelBase =
     getAppBaseUrl() ||
     (baseUrl && !/localhost|127\.0\.0\.1/i.test(baseUrl) ? baseUrl : "");
@@ -266,7 +263,11 @@ export async function processNextQueueItem(
     day: "numeric",
   });
 
-  const trackingPixelHtml = buildTrackingPixelHtml(pixelBase, trackingId);
+  const trackingPixelHtml = buildTrackingPixelHtml(
+    pixelBase,
+    trackingId,
+    item.email
+  );
 
   const variables = {
     reference_no: item.referenceNo || "",
