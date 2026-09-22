@@ -1,7 +1,7 @@
 import fs from "fs";
 import { randomUUID } from "crypto";
 import { db } from "@/db";
-import { gmailAccounts, queue, templates, campaigns } from "@/db/schema";
+import { gmailAccounts, queue, templates, campaigns, settings } from "@/db/schema";
 import { eq, asc, and, or, isNull, lte } from "drizzle-orm";
 import { toSendableEmailHtml } from "@/lib/quillToEmailHtml";
 import { readRows, updateRow } from "@/app/services/googleSheets";
@@ -350,6 +350,7 @@ export async function processNextQueueItem(
         if (Array.isArray(parsed)) {
           for (const att of parsed) {
             const filename = att.originalName || att.filename || "attachment";
+            const storedName = String(att.filename || "").trim();
             if (att.contentBase64 && typeof att.contentBase64 === "string") {
               try {
                 attachmentsList.push({
@@ -360,6 +361,29 @@ export async function processNextQueueItem(
                 continue;
               } catch (e) {
                 console.error("Bad base64 attachment", filename, e);
+              }
+            }
+            if (storedName) {
+              try {
+                const blobRows = await db
+                  .select()
+                  .from(settings)
+                  .where(eq(settings.key, `att_blob:${storedName}`))
+                  .limit(1);
+                if (blobRows.length) {
+                  const blob = JSON.parse(blobRows[0].value || "{}");
+                  if (blob.contentBase64) {
+                    attachmentsList.push({
+                      filename: blob.originalName || filename,
+                      content: Buffer.from(blob.contentBase64, "base64"),
+                      contentType:
+                        blob.contentType || att.contentType || undefined,
+                    });
+                    continue;
+                  }
+                }
+              } catch (e) {
+                console.error("att_blob load failed", storedName, e);
               }
             }
             if (att.path && fs.existsSync(att.path)) {
