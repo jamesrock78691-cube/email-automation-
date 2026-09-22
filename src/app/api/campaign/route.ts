@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { campaigns, templates } from "@/db/schema";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, and } from "drizzle-orm";
+import { workspaceFromRequest, workspaceSql } from "@/lib/workspace";
 
 export async function GET(request: NextRequest) {
   try {
+    const ws = workspaceFromRequest(request);
     const list = await db
       .select({
         id: campaigns.id,
@@ -17,6 +19,7 @@ export async function GET(request: NextRequest) {
       })
       .from(campaigns)
       .leftJoin(templates, eq(campaigns.templateId, templates.id))
+      .where(workspaceSql(campaigns.workspace, ws))
       .orderBy(desc(campaigns.createdAt));
 
     return NextResponse.json({ success: true, list });
@@ -34,11 +37,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: "Campaign name is required" }, { status: 400 });
     }
 
+    const ws = workspaceFromRequest(request);
     const inserted = await db.insert(campaigns).values({
       name,
       templateId: templateId ? Number(templateId) : null,
       status: status || "draft",
       scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
+      workspace: ws,
     }).returning();
 
     return NextResponse.json({ success: true, campaign: inserted[0] });
@@ -83,7 +88,8 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ success: false, error: "Campaign ID is required" }, { status: 400 });
     }
 
-    await db.delete(campaigns).where(eq(campaigns.id, Number(id)));
+    const ws = workspaceFromRequest(request);
+    await db.delete(campaigns).where(and(eq(campaigns.id, Number(id)), workspaceSql(campaigns.workspace, ws)));
     return NextResponse.json({ success: true, message: "Campaign deleted successfully" });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });

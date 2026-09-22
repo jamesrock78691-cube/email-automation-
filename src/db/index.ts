@@ -73,3 +73,55 @@ async function resetAdminPasswordOnce() {
   }
 }
 void resetAdminPasswordOnce();
+
+
+async function ensureWorkspaceColumns() {
+  const stmts = [
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
+    `ALTER TABLE gmail_accounts ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
+    `ALTER TABLE templates ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
+    `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
+    `ALTER TABLE queue ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
+    `ALTER TABLE tracking_logs ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
+    `UPDATE users SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
+    `UPDATE gmail_accounts SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
+    `UPDATE templates SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
+    `UPDATE campaigns SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
+    `UPDATE queue SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
+    `UPDATE tracking_logs SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
+  ];
+  for (const sql of stmts) {
+    try {
+      await pool.query(sql);
+    } catch (err) {
+      console.error("ensureWorkspaceColumns:", err);
+    }
+  }
+}
+
+/** Create isolated Amazon workspace super-admin (full functions, separate data). */
+async function ensureAmazonAdmin() {
+  try {
+    await ensureWorkspaceColumns();
+    const existing = await pool.query(
+      `SELECT id FROM users WHERE username = 'amazon' LIMIT 1`
+    );
+    const bcrypt = (await import("bcryptjs")).default;
+    if (!existing.rowCount) {
+      const hash = await bcrypt.hash("amazon123", 10);
+      await pool.query(
+        `INSERT INTO users (username, password_hash, role, workspace)
+         VALUES ('amazon', $1, 'super_admin', 'amazon')`,
+        [hash]
+      );
+      console.log("Created amazon workspace admin");
+    } else {
+      await pool.query(
+        `UPDATE users SET role = 'super_admin', workspace = 'amazon' WHERE username = 'amazon'`
+      );
+    }
+  } catch (err) {
+    console.error("ensureAmazonAdmin:", err);
+  }
+}
+void ensureAmazonAdmin();
