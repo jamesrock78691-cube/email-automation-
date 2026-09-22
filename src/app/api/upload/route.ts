@@ -1,9 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import path from "path";
+import { db } from "@/db";
+import { settings } from "@/db/schema";
+import { eq } from "drizzle-orm";
 
 export const runtime = "nodejs";
 
-const MAX_BYTES = 4.5 * 1024 * 1024; // ~4.5MB — safe for serverless + DB
+const MAX_BYTES = 4.5 * 1024 * 1024;
 
 const EXT_MIME: Record<string, string> = {
   ".pdf": "application/pdf",
@@ -53,7 +56,6 @@ export async function POST(request: NextRequest) {
     );
     const ext = getExt(originalName);
 
-    // Accept by MIME or by extension (browsers often send empty / octet-stream for PDF)
     const mimeOk =
       !file.type ||
       ALLOWED_MIME.has(file.type) ||
@@ -103,8 +105,31 @@ export async function POST(request: NextRequest) {
 
     const filename = `${Date.now()}_${originalName.replace(/\s+/g, "_")}`;
 
-    // Durable: base64 goes into template.attachmentsJson (DB).
-    // Local path is optional best-effort only (ephemeral on Vercel).
+    const blobKey = `att_blob:${filename}`;
+    const blobValue = JSON.stringify({
+      contentBase64,
+      contentType,
+      originalName,
+      size: buffer.length,
+    });
+    try {
+      const existing = await db
+        .select()
+        .from(settings)
+        .where(eq(settings.key, blobKey))
+        .limit(1);
+      if (existing.length) {
+        await db
+          .update(settings)
+          .set({ value: blobValue })
+          .where(eq(settings.key, blobKey));
+      } else {
+        await db.insert(settings).values({ key: blobKey, value: blobValue });
+      }
+    } catch (dbErr) {
+      console.error("att_blob save failed:", dbErr);
+    }
+
     return NextResponse.json({
       success: true,
       filename,
@@ -112,7 +137,6 @@ export async function POST(request: NextRequest) {
       contentType,
       size: buffer.length,
       contentBase64,
-      // legacy field — do not rely on path for send
       path: path.join("uploads", "attachments", filename),
     });
   } catch (error: any) {
