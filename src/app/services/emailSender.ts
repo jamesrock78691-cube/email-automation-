@@ -11,6 +11,7 @@ import {
   getAppBaseUrl,
 } from "@/lib/trackingPixel";
 import { smtpFromAddress, createSmtpTransport } from "@/lib/smtpAccount";
+import { workspaceSql, MAIN_WORKSPACE } from "@/lib/workspace";
 
 export interface SendResult {
   success: boolean;
@@ -39,7 +40,6 @@ function classifyError(errorMessage: string): {
   isDailyLimit: boolean;
 } {
   const msg = (errorMessage || "").toLowerCase();
-
   if (
     msg.includes("daily user sending limit") ||
     msg.includes("daily sending limit") ||
@@ -72,7 +72,6 @@ function classifyError(errorMessage: string): {
       isDailyLimit: isDaily,
     };
   }
-
   if (
     msg.includes("invalid login") ||
     msg.includes("authentication failed") ||
@@ -88,7 +87,6 @@ function classifyError(errorMessage: string): {
       isDailyLimit: false,
     };
   }
-
   if (
     msg.includes("user unknown") ||
     msg.includes("mailbox not found") ||
@@ -107,7 +105,6 @@ function classifyError(errorMessage: string): {
       isDailyLimit: false,
     };
   }
-
   return {
     type: "temporary",
     shouldDisableAccount: false,
@@ -122,7 +119,8 @@ function getBackoffSeconds(tries: number): number {
 }
 
 export async function processNextQueueItem(
-  baseUrl: string
+  baseUrl: string,
+  ws: string = MAIN_WORKSPACE
 ): Promise<SendResult> {
   const now = new Date();
   const todayLocal = now.toLocaleDateString("en-CA");
@@ -133,7 +131,8 @@ export async function processNextQueueItem(
     .where(
       and(
         eq(queue.status, "pending"),
-        or(isNull(queue.retryAfter), lte(queue.retryAfter, now))
+        or(isNull(queue.retryAfter), lte(queue.retryAfter, now)),
+        workspaceSql(queue.workspace, ws)
       )
     )
     .orderBy(asc(queue.tries), asc(queue.id))
@@ -162,7 +161,7 @@ export async function processNextQueueItem(
     getAppBaseUrl() ||
     (baseUrl && !/localhost|127\.0\.0\.1/i.test(baseUrl) ? baseUrl : "");
 
-  const accounts = await db.select().from(gmailAccounts);
+  const accounts = await db.select().from(gmailAccounts).where(workspaceSql(gmailAccounts.workspace, ws));
 
   for (const acc of accounts) {
     const updates: any = {};
