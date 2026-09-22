@@ -1,18 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { queue, templates, campaigns } from "@/db/schema";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, and } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { processNextQueueItem } from "@/app/services/emailSender";
 import { getAppBaseUrl } from "@/lib/trackingPixel";
 import { importPendingRowsToQueue } from "@/app/services/googleSheets";
+import { workspaceFromRequest, workspaceSql } from "@/lib/workspace";
 
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
   try {
-    const list = await db.select().from(queue).orderBy(desc(queue.createdAt));
+    const ws = workspaceFromRequest(request);
+    const list = await db.select().from(queue).where(workspaceSql(queue.workspace, ws)).orderBy(desc(queue.createdAt));
     return NextResponse.json({ success: true, list });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
@@ -23,8 +25,8 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const { action, items, campaignId, templateId } = body;
+    const ws = workspaceFromRequest(request);
 
-    // Stable public URL for open-tracking pixels (never bake preview hosts into emails)
     const baseUrl =
       getAppBaseUrl(request) ||
       (() => {
@@ -34,7 +36,7 @@ export async function POST(request: NextRequest) {
       })();
 
     if (action === "process_next") {
-      const result = await processNextQueueItem(baseUrl);
+      const result = await processNextQueueItem(baseUrl, ws);
       return NextResponse.json({ success: true, result });
     }
 
@@ -43,7 +45,7 @@ export async function POST(request: NextRequest) {
       let successCount = 0;
       let failCount = 0;
       for (let i = 0; i < 10; i++) {
-        const res = await processNextQueueItem(baseUrl);
+        const res = await processNextQueueItem(baseUrl, ws);
         if (!res.success && res.error?.includes("No pending emails")) break;
         results.push(res);
         if (res.success) successCount++;
@@ -61,7 +63,8 @@ export async function POST(request: NextRequest) {
       if (items && Array.isArray(items) && items.length > 0) {
         const allTemplates = await db
           .select({ id: templates.id, subject: templates.subject })
-          .from(templates);
+          .from(templates)
+          .where(workspaceSql(templates.workspace, ws));
         const validTemplateIds = new Set(allTemplates.map((t) => t.id));
         const firstTemplate = allTemplates[0] || null;
         const forcedTemplateId =
@@ -75,7 +78,7 @@ export async function POST(request: NextRequest) {
 
         const cid = campaignId != null && campaignId !== "" ? Number(campaignId) : null;
         if (cid && !Number.isNaN(cid)) {
-          const camps = await db.select().from(campaigns).where(eq(campaigns.id, cid)).limit(1);
+          const camps = await db.select().from(campaigns).where(and(eq(campaigns.id, cid), workspaceSql(campaigns.workspace, ws))).limit(1);
           if (camps.length > 0) {
             validCampaignId = camps[0].id;
             if (camps[0].templateId && validTemplateIds.has(camps[0].templateId)) {
@@ -120,6 +123,7 @@ export async function POST(request: NextRequest) {
               status: "pending" as const,
               tries: 0,
               maxTries: 3,
+              workspace: ws,
             };
           });
 
@@ -175,7 +179,7 @@ export async function POST(request: NextRequest) {
           gmailUsedEmail: null,
           sentAt: null,
         })
-        .where(eq(queue.status, "failed"));
+        .where(and(eq(queue.status, "failed"), workspaceSql(queue.workspace, ws)));
       return NextResponse.json({
         success: true,
         message: "Only failed emails have been reset to pending status.",
@@ -183,7 +187,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === "clear_all") {
-      await db.delete(queue);
+      await db.delete(queue).where(workspaceSql(queue.workspace, ws));
       return NextResponse.json({
         success: true,
         message: "Queue database tables cleared successfully.",
