@@ -6,6 +6,7 @@ export const users = pgTable("users", {
   username: text("username").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
   role: text("role").default("admin").notNull(),
+  workspace: text("workspace").default("main").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -85,6 +86,7 @@ export const gmailAccounts = pgTable("gmail_accounts", {
     .default(0)
     .notNull(),
 
+  workspace: text("workspace").default("main").notNull(),
   createdAt: timestamp("created_at")
     .defaultNow()
     .notNull(),
@@ -99,6 +101,7 @@ export const templates = pgTable("templates", {
 bodyText: text("body_text").default("").notNull(),
  // Rich HTML content
   attachmentsJson: text("attachments_json").default("[]").notNull(), // Array of {filename, url_or_path}
+  workspace: text("workspace").default("main").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -109,6 +112,7 @@ export const campaigns = pgTable("campaigns", {
   templateId: integer("template_id").references(() => templates.id, { onDelete: "set null" }),
   status: text("status").default("draft").notNull(), // 'draft', 'running', 'paused', 'completed'
   scheduledAt: timestamp("scheduled_at"),
+  workspace: text("workspace").default("main").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -137,6 +141,7 @@ export const queue = pgTable("queue", {
   sentAt: timestamp("sent_at"),
   openCount: integer("open_count").default(0).notNull(),
   lastOpenedAt: timestamp("last_opened_at"),
+  workspace: text("workspace").default("main").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -155,6 +160,7 @@ export const trackingLogs = pgTable("tracking_logs", {
   email: text("email"),
   markName: text("mark_name"),
   referenceNo: text("reference_no"),
+  workspace: text("workspace").default("main").notNull(),
 });
 
 // General Settings
