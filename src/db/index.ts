@@ -62,9 +62,45 @@ async function ensureWorkspaceColumns() {
   }
 }
 
+/** Copy workspace from queue → tracking_logs so Amazon opens appear on dashboard */
+async function backfillTrackingLogWorkspace() {
+  try {
+    const flagKey = "tracking_logs_workspace_backfill_v1";
+    const flag = await pool.query(
+      `SELECT 1 FROM settings WHERE key = $1 LIMIT 1`,
+      [flagKey]
+    );
+    // Always run sync for mismatched rows (cheap); flag only logs once
+    const res = await pool.query(`
+      UPDATE tracking_logs tl
+      SET workspace = q.workspace
+      FROM queue q
+      WHERE tl.tracking_id = q.tracking_id
+        AND q.workspace IS NOT NULL
+        AND q.workspace <> ''
+        AND tl.workspace IS DISTINCT FROM q.workspace
+    `);
+    if (res.rowCount && res.rowCount > 0) {
+      console.log(
+        `backfillTrackingLogWorkspace: fixed ${res.rowCount} rows`
+      );
+    }
+    if (!flag.rowCount) {
+      await pool.query(
+        `INSERT INTO settings (key, value) VALUES ($1, 'done')
+         ON CONFLICT (key) DO NOTHING`,
+        [flagKey]
+      );
+    }
+  } catch (err) {
+    console.error("backfillTrackingLogWorkspace:", err);
+  }
+}
+
 async function ensureEmailWorkspaceUnique() {
   try {
     await ensureWorkspaceColumns();
+    await backfillTrackingLogWorkspace();
     await pool.query(
       `ALTER TABLE gmail_accounts DROP CONSTRAINT IF EXISTS gmail_accounts_email_key`
     );
@@ -85,7 +121,6 @@ void ensureEmailWorkspaceUnique();
 
 /**
  * Hard isolation: known Amazon SMTP emails always live in amazon workspace.
- * Runs every cold start until flag is set (one-shot after success).
  */
 async function isolateAmazonSmtpV3() {
   try {
@@ -99,7 +134,6 @@ async function isolateAmazonSmtpV3() {
     await ensureWorkspaceColumns();
     await ensureEmailWorkspaceUnique();
 
-    // Known Amazon-only addresses (add more if needed)
     const amazonEmails = ["lxx12402@gmail.com"];
 
     for (const em of amazonEmails) {
