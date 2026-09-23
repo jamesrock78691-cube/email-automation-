@@ -1,69 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/db";
+import { db, pool } from "@/db";
 import { gmailAccounts, settings } from "@/db/schema";
 import { eq, inArray, and } from "drizzle-orm";
-import { createHmac, timingSafeEqual } from "crypto";
 import { shouldResetDailyQuota } from "@/lib/dailyQuota";
-import { workspaceFromRequest, workspaceSql, resolveWorkspace } from "@/lib/workspace";
-
-const SECRET =
-  process.env.AUTH_SECRET ||
-  process.env.DATABASE_URL ||
-  "email-automation-v1-dev-secret-change-me";
-
-function verifyToken(token: string): {
-  userId: number;
-  username: string;
-  role: string;
-  workspace?: string;
-} | null {
-  try {
-    if (!token || !token.includes(".")) return null;
-    const [payloadB64, sig] = token.split(".");
-    const expected = createHmac("sha256", SECRET)
-      .update(payloadB64)
-      .digest("hex");
-    const a = Buffer.from(sig);
-    const b = Buffer.from(expected);
-    if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
-    const json = Buffer.from(
-      payloadB64.replace(/-/g, "+").replace(/_/g, "/"),
-      "base64"
-    ).toString("utf8");
-    const payload = JSON.parse(json);
-    if (!payload?.userId || Date.now() > payload.exp) return null;
-    return {
-      userId: payload.userId,
-      username: payload.username || "",
-      role: payload.role || "operator",
-      workspace: payload.workspace,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function getSession(req: NextRequest) {
-  const auth = req.headers.get("authorization");
-  const token = auth?.startsWith("Bearer ")
-    ? auth.slice(7).trim()
-    : req.cookies.get("ea_session")?.value;
-  if (!token) return null;
-  return verifyToken(token);
-}
-
-function normalizeRole(role: string, username?: string) {
-  const r = (role || "").toLowerCase().trim();
-  if (
-    r === "super_admin" ||
-    username === "admin" ||
-    username === "superadmin"
-  ) {
-    return "super_admin";
-  }
-  if (r === "admin") return "admin";
-  return "operator";
-}
+import { workspaceSql } from "@/lib/workspace";
+import {
+  getSessionFromRequest,
+  normalizeRole,
+} from "@/lib/authSession";
 
 async function getSmtpAssignments(ws: string): Promise<Record<string, number[]>> {
   try {
@@ -82,10 +26,9 @@ async function getSmtpAssignments(ws: string): Promise<Record<string, number[]>>
   }
 }
 
-// GET accounts — role-aware, passwords hidden for operators
 export async function GET(request: NextRequest) {
   try {
-    const session = getSession(request);
+    const session = getSessionFromRequest(request);
     if (!session) {
       return NextResponse.json(
         { success: false, error: "Unauthorized" },
@@ -94,7 +37,7 @@ export async function GET(request: NextRequest) {
     }
 
     const role = normalizeRole(session.role, session.username);
-    const ws = resolveWorkspace(session.username, session.workspace);
+    const ws = session.workspace;
     let list: any[] = [];
 
     if (role === "operator") {
@@ -118,14 +61,8 @@ export async function GET(request: NextRequest) {
             )
           )
           .orderBy(gmailAccounts.id);
-      } else {
-        list = [];
       }
-
-      list = list.map((a) => {
-        const { appPassword, ...rest } = a;
-        return rest;
-      });
+      list = list.map(({ appPassword, ...rest }) => rest);
     } else {
       list = await db
         .select()
@@ -165,7 +102,8 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    return NextResponse.json({ success: true, list });
+    console.log(`[GMAIL GET] user=${session.username} ws=${ws} count=${list.length}`);
+    return NextResponse.json({ success: true, list, workspace: ws });
   } catch (error: any) {
     return NextResponse.json(
       { success: false, error: error.message },
@@ -174,10 +112,9 @@ export async function GET(request: NextRequest) {
   }
 }
 
-// POST: Add new account (admin/super only)
 export async function POST(request: NextRequest) {
   try {
-    const session = getSession(request);
+    const session = getSessionFromRequest(request);
     if (!session) {
       return NextResponse.json(
         { success: false, error: "Unauthorized" },
@@ -193,7 +130,6 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-
     const {
       email,
       smtpUsername,
@@ -218,31 +154,49 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const ws = resolveWorkspace(session.username, session.workspace);
+    const ws = session.workspace;
+    const emailNorm = String(email).trim().toLowerCase();
 
-    const inserted = await db
-      .insert(gmailAccounts)
-      .values({
-        email: String(email).trim().toLowerCase(),
-        smtpUsername: smtpUsername || null,
-        fromEmail: fromEmail || email,
-        senderName: senderName || "Trademark Processing Department",
-        replyToEmail: replyToEmail || null,
-        provider: provider || "gmail",
+    // Force workspace via raw SQL so it can never default to main
+    const port = smtpPort ? Number(smtpPort) : 465;
+    const isSecure =
+      secure !== undefined ? Boolean(secure) : port === 465;
+
+    const result = await pool.query(
+      `INSERT INTO gmail_accounts (
+         email, smtp_username, from_email, sender_name, reply_to_email,
+         provider, app_password, smtp_host, smtp_port, secure,
+         priority, daily_limit, minute_limit, status, workspace
+       ) VALUES (
+         $1, $2, $3, $4, $5,
+         $6, $7, $8, $9, $10,
+         $11, $12, $13, $14, $15
+       )
+       RETURNING *`,
+      [
+        emailNorm,
+        smtpUsername || null,
+        fromEmail || emailNorm,
+        senderName || "Trademark Processing Department",
+        replyToEmail || null,
+        provider || "gmail",
         appPassword,
-        smtpHost: smtpHost || "smtp.gmail.com",
-        smtpPort: smtpPort ? Number(smtpPort) : 465,
-        secure:
-          secure !== undefined ? Boolean(secure) : Number(smtpPort) === 465,
-        priority: priority ? Number(priority) : 1,
-        dailyLimit: dailyLimit ? Number(dailyLimit) : 500,
-        minuteLimit: minuteLimit ? Number(minuteLimit) : 50,
-        status: status || "enabled",
-        workspace: ws,
-      })
-      .returning();
+        smtpHost || "smtp.gmail.com",
+        port,
+        isSecure,
+        priority ? Number(priority) : 1,
+        dailyLimit ? Number(dailyLimit) : 500,
+        minuteLimit ? Number(minuteLimit) : 50,
+        status || "enabled",
+        ws,
+      ]
+    );
 
-    return NextResponse.json({ success: true, account: inserted[0] });
+    const account = result.rows[0];
+    console.log(
+      `[GMAIL POST] user=${session.username} ws=${ws} email=${emailNorm} id=${account?.id}`
+    );
+    return NextResponse.json({ success: true, account, workspace: ws });
   } catch (error: any) {
     const msg = String(error?.message || error || "");
     const cause = String(error?.cause?.message || error?.cause || "");
@@ -255,19 +209,9 @@ export async function POST(request: NextRequest) {
         {
           success: false,
           error:
-            "Ye email pehle se add hai. Gmail list mein check karo, ya dusra account use karo.",
+            "Ye email is workspace mein pehle se add hai. Dusra email use karo.",
         },
         { status: 409 }
-      );
-    }
-    if (/workspace|column .* does not exist/i.test(full)) {
-      return NextResponse.json(
-        {
-          success: false,
-          error:
-            "DB workspace column missing — page refresh karke 10 sec wait, phir dubara try.",
-        },
-        { status: 500 }
       );
     }
     return NextResponse.json(
@@ -277,10 +221,9 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// PUT: Update account (admin/super only)
 export async function PUT(request: NextRequest) {
   try {
-    const session = getSession(request);
+    const session = getSessionFromRequest(request);
     if (!session) {
       return NextResponse.json(
         { success: false, error: "Unauthorized" },
@@ -296,7 +239,6 @@ export async function PUT(request: NextRequest) {
     }
 
     const body = await request.json();
-
     const {
       id,
       email,
@@ -323,8 +265,31 @@ export async function PUT(request: NextRequest) {
       );
     }
 
-    const updates: any = {};
+    const ws = session.workspace;
 
+    // Only touch accounts in THIS workspace
+    const existing = await db
+      .select()
+      .from(gmailAccounts)
+      .where(
+        and(
+          eq(gmailAccounts.id, Number(id)),
+          workspaceSql(gmailAccounts.workspace, ws)
+        )
+      )
+      .limit(1);
+
+    if (!existing.length) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Account not found in your workspace",
+        },
+        { status: 404 }
+      );
+    }
+
+    const updates: any = {};
     if (email !== undefined) updates.email = String(email).trim().toLowerCase();
     if (smtpUsername !== undefined) updates.smtpUsername = smtpUsername || null;
     if (fromEmail !== undefined) updates.fromEmail = fromEmail || null;
@@ -344,21 +309,31 @@ export async function PUT(request: NextRequest) {
         updates.cooldownUntil = null;
       }
     }
-
     if (resetLimits) {
       updates.sentToday = 0;
       updates.sentThisMinute = 0;
       updates.errorCount = 0;
       updates.cooldownUntil = null;
     }
+    // Never allow client to change workspace
+    updates.workspace = ws;
 
     const updated = await db
       .update(gmailAccounts)
       .set(updates)
-      .where(eq(gmailAccounts.id, Number(id)))
+      .where(
+        and(
+          eq(gmailAccounts.id, Number(id)),
+          workspaceSql(gmailAccounts.workspace, ws)
+        )
+      )
       .returning();
 
-    return NextResponse.json({ success: true, account: updated[0] });
+    return NextResponse.json({
+      success: true,
+      account: updated[0],
+      workspace: ws,
+    });
   } catch (error: any) {
     const msg = String(error?.message || "");
     if (/unique|duplicate/i.test(msg)) {
@@ -374,10 +349,9 @@ export async function PUT(request: NextRequest) {
   }
 }
 
-// DELETE: Remove account (admin/super only)
 export async function DELETE(request: NextRequest) {
   try {
-    const session = getSession(request);
+    const session = getSessionFromRequest(request);
     if (!session) {
       return NextResponse.json(
         { success: false, error: "Unauthorized" },
@@ -394,7 +368,6 @@ export async function DELETE(request: NextRequest) {
 
     const { searchParams } = new URL(request.url);
     const id = searchParams.get("id");
-
     if (!id) {
       return NextResponse.json(
         { success: false, error: "Account ID is required" },
@@ -402,19 +375,28 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    const ws = resolveWorkspace(session.username, session.workspace);
-    await db
+    const ws = session.workspace;
+    const deleted = await db
       .delete(gmailAccounts)
       .where(
         and(
           eq(gmailAccounts.id, Number(id)),
           workspaceSql(gmailAccounts.workspace, ws)
         )
+      )
+      .returning();
+
+    if (!deleted.length) {
+      return NextResponse.json(
+        { success: false, error: "Account not found in your workspace" },
+        { status: 404 }
       );
+    }
 
     return NextResponse.json({
       success: true,
       message: "Account deleted successfully",
+      workspace: ws,
     });
   } catch (error: any) {
     return NextResponse.json(
