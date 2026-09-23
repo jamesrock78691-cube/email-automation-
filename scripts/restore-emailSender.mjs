@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Restores emailSender.ts if broken + workspace sheet updates +
- * template vars only mark_name + name.
+ * Restores emailSender.ts + workspace sheet updates +
+ * Amazon: only mark_name + name | Main: full variable set.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -49,6 +49,15 @@ async function main() {
 
   if (!text.includes("processNextQueueItem")) {
     throw new Error("emailSender source invalid");
+  }
+
+  // Ensure AMAZON_WORKSPACE import
+  if (!text.includes("AMAZON_WORKSPACE")) {
+    text = text.replace(
+      `import { workspaceSql, MAIN_WORKSPACE } from "@/lib/workspace";`,
+      `import { workspaceSql, MAIN_WORKSPACE, AMAZON_WORKSPACE } from "@/lib/workspace";`
+    );
+    console.log("Patched: AMAZON_WORKSPACE import");
   }
 
   // Workspace-aware sheet updates
@@ -99,10 +108,8 @@ async function main() {
     "workspace sheet update"
   );
 
-  // Only mark_name + name for templates (name stored in queue.referenceNo)
-  text = patch(
-    text,
-    `  const variables = {
+  // Variables: Amazon = mark_name + name only; Main = full set
+  const OLD_VARS = `  const variables = {
     reference_no: item.referenceNo || "",
     serial_no: item.serialNo || "",
     mark_name: item.markName || "",
@@ -112,28 +119,38 @@ async function main() {
     email: item.email,
     today: todayStr,
     tracking_pixel: trackingPixelHtml,
-  };`,
-    `  // Template variables: ONLY mark_name + name (from sheet)
-  const variables = {
-    mark_name: item.markName || "",
-    name: item.referenceNo || "",
-    tracking_pixel: trackingPixelHtml,
-  };`,
-    "template vars mark_name+name only"
-  );
+  };`;
 
-  // Also handle if already partially patched with more fields
-  if (
-    text.includes("owner_name:") &&
-    text.includes("const variables = {")
-  ) {
+  const NEW_VARS = `  // Amazon workspace: only mark_name + name. Main: full set (unchanged).
+  const isAmazon = String(ws || "").toLowerCase() === AMAZON_WORKSPACE || String(ws || "").toLowerCase() === "amazon";
+  const variables = isAmazon
+    ? {
+        mark_name: item.markName || "",
+        name: item.referenceNo || "",
+        tracking_pixel: trackingPixelHtml,
+      }
+    : {
+        reference_no: item.referenceNo || "",
+        serial_no: item.serialNo || "",
+        mark_name: item.markName || "",
+        filing_date: item.filingDate || "",
+        owner_name: (item.markName || "") + " Legal Owner",
+        client_name: (item.markName || "") + " Client",
+        email: item.email,
+        today: todayStr,
+        tracking_pixel: trackingPixelHtml,
+      };`;
+
+  if (text.includes(OLD_VARS)) {
+    text = text.replace(OLD_VARS, NEW_VARS);
+    console.log("Patched: amazon-only vs main full variables");
+  } else if (text.includes("const isAmazon") && text.includes("AMAZON_WORKSPACE")) {
+    console.log("Amazon/main variables already present");
+  } else {
+    // Regex fallback if previous amazon-only patch left a short variables block
     text = text.replace(
       /const variables = \{[\s\S]*?tracking_pixel: trackingPixelHtml,\s*\};/,
-      `const variables = {
-    mark_name: item.markName || "",
-    name: item.referenceNo || "",
-    tracking_pixel: trackingPixelHtml,
-  };`
+      NEW_VARS.replace(/^  /, "")
     );
     console.log("Patched variables via regex fallback");
   }
