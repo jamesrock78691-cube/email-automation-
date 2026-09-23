@@ -12,6 +12,11 @@ import {
   injectTrackingPixel,
 } from "@/lib/trackingPixel";
 import { smtpFromAddress, createSmtpTransport } from "@/lib/smtpAccount";
+import {
+  workspaceFromRequest,
+  workspaceSql,
+  settingKey,
+} from "@/lib/workspace";
 
 export async function POST(request: NextRequest) {
   try {
@@ -36,6 +41,7 @@ export async function POST(request: NextRequest) {
     } = body;
 
     const emailHtml = toSendableEmailHtml(String(html || ""));
+    const ws = workspaceFromRequest(request);
 
     if (!to || !subject || !html) {
       return NextResponse.json(
@@ -49,7 +55,12 @@ export async function POST(request: NextRequest) {
       const rows = await db
         .select()
         .from(gmailAccounts)
-        .where(eq(gmailAccounts.id, Number(smtpAccountId)))
+        .where(
+          and(
+            eq(gmailAccounts.id, Number(smtpAccountId)),
+            workspaceSql(gmailAccounts.workspace, ws)
+          )
+        )
         .limit(1);
       account = rows[0] || null;
     }
@@ -58,7 +69,12 @@ export async function POST(request: NextRequest) {
       const accounts = await db
         .select()
         .from(gmailAccounts)
-        .where(eq(gmailAccounts.status, "enabled"))
+        .where(
+          and(
+            eq(gmailAccounts.status, "enabled"),
+            workspaceSql(gmailAccounts.workspace, ws)
+          )
+        )
         .orderBy(desc(gmailAccounts.priority));
 
       const now = new Date();
@@ -83,7 +99,7 @@ export async function POST(request: NextRequest) {
         {
           success: false,
           error:
-            "No available SMTP account (all disabled, cooldown, or daily limit reached).",
+            "No available SMTP account in this workspace (all disabled, cooldown, or daily limit reached).",
         },
         { status: 400 }
       );
@@ -98,7 +114,7 @@ export async function POST(request: NextRequest) {
     const pixel = buildTrackingPixelHtml(pixelBase, trackingId, to);
     const htmlWithPixel = injectTrackingPixel(emailHtml, pixel);
     console.log(
-      `[MANUAL SEND] trackingId=${trackingId} pixelBase=${pixelBase} htmlHasPixel=${htmlWithPixel.includes("/api/track/")}`
+      `[MANUAL SEND] ws=${ws} trackingId=${trackingId} pixelBase=${pixelBase}`
     );
 
     await transporter.sendMail({
@@ -126,10 +142,11 @@ export async function POST(request: NextRequest) {
       .where(eq(gmailAccounts.id, account.id));
 
     try {
+      const mapKey = settingKey("manual_track_map", ws);
       const mapRows = await db
         .select()
         .from(settings)
-        .where(eq(settings.key, "manual_track_map"))
+        .where(eq(settings.key, mapKey))
         .limit(1);
       const map = mapRows.length
         ? JSON.parse(mapRows[0].value || "{}")
@@ -141,6 +158,7 @@ export async function POST(request: NextRequest) {
         referenceNo: referenceNo || "MANUAL",
         sentAt: new Date().toISOString(),
         sentBy: sentByUsername || "",
+        workspace: ws,
       };
       const keys = Object.keys(map);
       if (keys.length > 500) {
@@ -150,10 +168,10 @@ export async function POST(request: NextRequest) {
         await db
           .update(settings)
           .set({ value: JSON.stringify(map) })
-          .where(eq(settings.key, "manual_track_map"));
+          .where(eq(settings.key, mapKey));
       } else {
         await db.insert(settings).values({
-          key: "manual_track_map",
+          key: mapKey,
           value: JSON.stringify(map),
         });
       }
@@ -188,6 +206,7 @@ export async function POST(request: NextRequest) {
       message: "Email sent successfully",
       usedAccount: account.email,
       trackingId,
+      workspace: ws,
       htmlLength: htmlWithPixel.length,
     });
   } catch (error: any) {
