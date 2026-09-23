@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import path from "path";
-import { db } from "@/db";
-import { settings } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { pool } from "@/db";
 
 export const runtime = "nodejs";
 
@@ -105,6 +103,7 @@ export async function POST(request: NextRequest) {
 
     const filename = `${Date.now()}_${originalName.replace(/\s+/g, "_")}`;
 
+    // Durable store on Postgres (Vercel disk is ephemeral)
     const blobKey = `att_blob:${filename}`;
     const blobValue = JSON.stringify({
       contentBase64,
@@ -112,22 +111,37 @@ export async function POST(request: NextRequest) {
       originalName,
       size: buffer.length,
     });
+
     try {
-      const existing = await db
-        .select()
-        .from(settings)
-        .where(eq(settings.key, blobKey))
-        .limit(1);
-      if (existing.length) {
-        await db
-          .update(settings)
-          .set({ value: blobValue })
-          .where(eq(settings.key, blobKey));
-      } else {
-        await db.insert(settings).values({ key: blobKey, value: blobValue });
+      await pool.query(
+        `INSERT INTO settings (key, value) VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+        [blobKey, blobValue]
+      );
+      // verify
+      const check = await pool.query(
+        `SELECT length(value) AS len FROM settings WHERE key = $1`,
+        [blobKey]
+      );
+      const len = Number(check.rows?.[0]?.len || 0);
+      if (len < 50) {
+        throw new Error("Attachment blob write verification failed");
       }
-    } catch (dbErr) {
+      console.log(
+        `[UPLOAD] saved ${blobKey} bytes=${buffer.length} blobLen=${len}`
+      );
+    } catch (dbErr: any) {
       console.error("att_blob save failed:", dbErr);
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Attachment DB save failed: " +
+            (dbErr?.message || "unknown") +
+            ". Try smaller file or retry.",
+        },
+        { status: 500 }
+      );
     }
 
     return NextResponse.json({
@@ -136,10 +150,12 @@ export async function POST(request: NextRequest) {
       originalName,
       contentType,
       size: buffer.length,
+      // Client may embed in template; sender also loads from att_blob
       contentBase64,
       path: path.join("uploads", "attachments", filename),
     });
   } catch (error: any) {
+    console.error("Upload error:", error);
     return NextResponse.json(
       { success: false, error: error.message || "Upload failed" },
       { status: 500 }
