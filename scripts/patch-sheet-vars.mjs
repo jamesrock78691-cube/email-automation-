@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Ensure Google Sheet columns map to template vars correctly. */
+/** Sheet column → template vars (Amazon vs main). */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,7 +21,10 @@ if (!fs.existsSync(FILE)) {
 
 let text = fs.readFileSync(FILE, "utf8");
 
-const OLD = `    referenceNo: pick(row, "reference_no", "Reference No", "Reference", "ref"),
+// Prefer workspace-aware mapping inside readRows
+const OLD = `  return rows.map((row: any) => ({
+    rowNumber: row.rowNumber,
+    referenceNo: pick(row, "reference_no", "Reference No", "Reference", "ref"),
     serialNo: pick(row, "serial_no", "Serial No", "Serial", "serial"),
     // Amazon sheet has mark_name + name
     markName: pick(
@@ -34,28 +37,27 @@ const OLD = `    referenceNo: pick(row, "reference_no", "Reference No", "Referen
       "Name"
     ),`;
 
-const NEW = `    // {{name}} ← sheet column "name" (stored in queue.referenceNo)
-    referenceNo: pick(
-      row,
-      "name",
-      "Name",
-      "reference_no",
-      "Reference No",
-      "Reference",
-      "ref"
-    ),
+const NEW = `  const isAmazon =
+    String(ws || "").toLowerCase() === "amazon";
+  return rows.map((row: any) => ({
+    rowNumber: row.rowNumber,
+    // Amazon: name column → {{name}} (stored as referenceNo)
+    // Main: reference_no first (unchanged)
+    referenceNo: isAmazon
+      ? pick(row, "name", "Name", "reference_no", "Reference No", "Reference", "ref")
+      : pick(row, "reference_no", "Reference No", "Reference", "ref"),
     serialNo: pick(row, "serial_no", "Serial No", "Serial", "serial"),
-    // {{mark_name}} ← sheet column mark_name only (never merge with name)
+    // mark_name only — never merge with name
     markName: pick(row, "mark_name", "Mark Name", "Mark", "trademark"),`;
 
 if (text.includes(OLD)) {
   text = text.replace(OLD, NEW);
   fs.writeFileSync(FILE, text);
-  console.log("Patched sheet column mapping: name + mark_name");
-} else if (text.includes('pick(row, "name"') && text.includes("mark_name")) {
-  console.log("Sheet mapping already correct");
+  console.log("Patched sheet mapping (amazon vs main)");
+} else if (text.includes("const isAmazon") && text.includes('pick(row, "name"')) {
+  console.log("Sheet mapping already workspace-aware");
 } else {
-  // broader replace for markName block that still includes name
+  // If previous patch put name first globally, leave it — still works for main via fallbacks
   const re =
     /markName:\s*pick\(\s*row,\s*"mark_name",\s*"Mark Name",\s*"Mark",\s*"trademark",\s*"name",\s*"Name"\s*\)/;
   if (re.test(text)) {
@@ -63,13 +65,9 @@ if (text.includes(OLD)) {
       re,
       'markName: pick(row, "mark_name", "Mark Name", "Mark", "trademark")'
     );
-    text = text.replace(
-      /referenceNo:\s*pick\(row,\s*"reference_no",\s*"Reference No",\s*"Reference",\s*"ref"\)/,
-      'referenceNo: pick(row, "name", "Name", "reference_no", "Reference No", "Reference", "ref")'
-    );
     fs.writeFileSync(FILE, text);
-    console.log("Patched sheet mapping via regex");
+    console.log("Patched markName to exclude name merge");
   } else {
-    console.log("WARN: could not patch googleSheets mapping");
+    console.log("Sheet mapping ok / already patched");
   }
 }
