@@ -62,29 +62,21 @@ async function ensureWorkspaceColumns() {
   }
 }
 
-/** Drop global unique on email so main + amazon can both have accounts independently. */
 async function ensureEmailWorkspaceUnique() {
   try {
     await ensureWorkspaceColumns();
-    // Drop common constraint names Postgres/Drizzle might have used
     await pool.query(
       `ALTER TABLE gmail_accounts DROP CONSTRAINT IF EXISTS gmail_accounts_email_key`
     );
     await pool.query(
       `ALTER TABLE gmail_accounts DROP CONSTRAINT IF EXISTS gmail_accounts_email_unique`
     );
-    await pool.query(
-      `DROP INDEX IF EXISTS gmail_accounts_email_key`
-    );
-    await pool.query(
-      `DROP INDEX IF EXISTS gmail_accounts_email_unique`
-    );
-    // Composite unique: same email OK in different workspaces, not within same ws
+    await pool.query(`DROP INDEX IF EXISTS gmail_accounts_email_key`);
+    await pool.query(`DROP INDEX IF EXISTS gmail_accounts_email_unique`);
     await pool.query(
       `CREATE UNIQUE INDEX IF NOT EXISTS gmail_accounts_email_workspace_uidx
        ON gmail_accounts (lower(email), workspace)`
     );
-    console.log("gmail_accounts email unique is now per-workspace");
   } catch (err) {
     console.error("ensureEmailWorkspaceUnique:", err);
   }
@@ -92,11 +84,12 @@ async function ensureEmailWorkspaceUnique() {
 void ensureEmailWorkspaceUnique();
 
 /**
- * Force lxx12402 SMTP to amazon only (re-runnable flag).
+ * Hard isolation: known Amazon SMTP emails always live in amazon workspace.
+ * Runs every cold start until flag is set (one-shot after success).
  */
-async function isolateAmazonSmtpForce() {
+async function isolateAmazonSmtpV3() {
   try {
-    const flagKey = "amazon_smtp_isolate_lxx12402_v2_20260923";
+    const flagKey = "amazon_hard_isolate_v3_20260924";
     const flag = await pool.query(
       `SELECT 1 FROM settings WHERE key = $1 LIMIT 1`,
       [flagKey]
@@ -104,29 +97,38 @@ async function isolateAmazonSmtpForce() {
     if (flag.rowCount && flag.rowCount > 0) return;
 
     await ensureWorkspaceColumns();
+    await ensureEmailWorkspaceUnique();
 
-    const moved = await pool.query(
-      `UPDATE gmail_accounts
-       SET workspace = 'amazon'
-       WHERE lower(email) = 'lxx12402@gmail.com'
-          OR lower(coalesce(from_email, '')) = 'lxx12402@gmail.com'`
+    // Known Amazon-only addresses (add more if needed)
+    const amazonEmails = ["lxx12402@gmail.com"];
+
+    for (const em of amazonEmails) {
+      const moved = await pool.query(
+        `UPDATE gmail_accounts
+         SET workspace = 'amazon'
+         WHERE lower(email) = $1
+            OR lower(coalesce(from_email, '')) = $1`,
+        [em]
+      );
+      console.log(`isolate v3: ${em} → amazon rows=${moved.rowCount ?? 0}`);
+    }
+
+    await pool.query(
+      `UPDATE users SET workspace = 'amazon', role = 'super_admin'
+       WHERE lower(username) = 'amazon'`
     );
 
     await pool.query(
       `INSERT INTO settings (key, value)
-       VALUES ($1, $2)
+       VALUES ($1, 'done')
        ON CONFLICT (key) DO NOTHING`,
-      [flagKey, `moved:${moved.rowCount ?? 0}`]
-    );
-    console.log(
-      "Isolated lxx12402@gmail.com → amazon. rows:",
-      moved.rowCount ?? 0
+      [flagKey]
     );
   } catch (err) {
-    console.error("isolateAmazonSmtpForce:", err);
+    console.error("isolateAmazonSmtpV3:", err);
   }
 }
-void isolateAmazonSmtpForce();
+void isolateAmazonSmtpV3();
 
 async function ensureAmazonAdmin() {
   try {
@@ -142,10 +144,10 @@ async function ensureAmazonAdmin() {
          VALUES ('amazon', $1, 'super_admin', 'amazon')`,
         [hash]
       );
-      console.log("Created amazon workspace admin");
     } else {
       await pool.query(
-        `UPDATE users SET role = 'super_admin', workspace = 'amazon' WHERE username = 'amazon'`
+        `UPDATE users SET role = 'super_admin', workspace = 'amazon'
+         WHERE username = 'amazon'`
       );
     }
   } catch (err) {
@@ -153,43 +155,3 @@ async function ensureAmazonAdmin() {
   }
 }
 void ensureAmazonAdmin();
-
-/** Keep password reset available if not already done. */
-async function resetAllPasswordsCubetech26() {
-  try {
-    const flagKey = "all_pw_reset_cubetech26_20260923";
-    const flag = await pool.query(
-      `SELECT 1 FROM settings WHERE key = $1 LIMIT 1`,
-      [flagKey]
-    );
-    if (flag.rowCount && flag.rowCount > 0) return;
-
-    const bcrypt = (await import("bcryptjs")).default;
-    const hash = await bcrypt.hash("cubetech26", 10);
-
-    await pool.query(`UPDATE users SET password_hash = $1`, [hash]);
-
-    await pool.query(
-      `INSERT INTO users (username, password_hash, role, workspace)
-       VALUES
-         ('admin', $1, 'super_admin', 'main'),
-         ('superadmin', $1, 'super_admin', 'main'),
-         ('amazon', $1, 'super_admin', 'amazon')
-       ON CONFLICT (username) DO UPDATE
-       SET password_hash = EXCLUDED.password_hash,
-           workspace = EXCLUDED.workspace,
-           role = EXCLUDED.role`,
-      [hash]
-    );
-
-    await pool.query(
-      `INSERT INTO settings (key, value)
-       VALUES ($1, 'done')
-       ON CONFLICT (key) DO NOTHING`,
-      [flagKey]
-    );
-  } catch (err) {
-    console.error("resetAllPasswordsCubetech26:", err);
-  }
-}
-void resetAllPasswordsCubetech26();
