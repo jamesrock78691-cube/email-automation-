@@ -2,6 +2,7 @@
 /**
  * Restores src/app/page.tsx from last known-good commit (CDN),
  * then injects attachment base64 + auth headers for workspace isolation.
+ * IMPORTANT: never leave two "headers:" keys in the same object literal.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -21,12 +22,13 @@ async function fetchText(url) {
 }
 
 function patch(text, oldStr, newStr, label) {
-  if (text.includes(oldStr)) {
-    text = text.split(oldStr).join(newStr);
-    console.log("Patched:", label);
-  } else {
+  if (!text.includes(oldStr)) {
     console.log("Skip (not found):", label);
+    return text;
   }
+  const count = text.split(oldStr).length - 1;
+  text = text.split(oldStr).join(newStr);
+  console.log(`Patched (${count}x):`, label);
   return text;
 }
 
@@ -55,7 +57,7 @@ try {
     "contentBase64 attachment"
   );
 
-  // 2) Gmail save MUST send Bearer token (workspace isolation)
+  // 2) Gmail save — Bearer token
   text = patch(
     text,
     `      const res = await fetch(url, {
@@ -71,53 +73,61 @@ try {
     "gmail save authHeaders"
   );
 
-  // 3) Queue process_next / process_batch must send token
-  text = patch(
-    text,
-    `body: JSON.stringify({ action: "process_next" })`,
-    `headers: authHeaders(), body: JSON.stringify({ action: "process_next" })`,
-    "process_next auth"
-  );
-
-  // Fix double-headers if we already had Content-Type line before body
-  // Normalize common pattern: headers Content-Type then body process_next
+  // 3) Queue actions — replace FULL header+body block (avoids duplicate headers key)
+  // Matches both 8-space and 12-space indent variants of process_next
   text = patch(
     text,
     `headers: { "Content-Type": "application/json" },
-        headers: authHeaders(), body: JSON.stringify({ action: "process_next" })`,
+            body: JSON.stringify({ action: "process_next" }),`,
     `headers: authHeaders(),
-        body: JSON.stringify({ action: "process_next" })`,
-    "process_next dedupe headers"
+            body: JSON.stringify({ action: "process_next" }),`,
+    "process_next auth (12-space)"
   );
-
   text = patch(
     text,
     `headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "process_batch" })`,
+        body: JSON.stringify({ action: "process_next" }),`,
     `headers: authHeaders(),
-        body: JSON.stringify({ action: "process_batch" })`,
+        body: JSON.stringify({ action: "process_next" }),`,
+    "process_next auth (8-space)"
+  );
+  text = patch(
+    text,
+    `headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "process_batch" }),`,
+    `headers: authHeaders(),
+        body: JSON.stringify({ action: "process_batch" }),`,
     "process_batch auth"
   );
-
   text = patch(
     text,
     `headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "reset_all" })`,
+        body: JSON.stringify({ action: "reset_all" }),`,
     `headers: authHeaders(),
-        body: JSON.stringify({ action: "reset_all" })`,
+        body: JSON.stringify({ action: "reset_all" }),`,
     "reset_all auth"
   );
-
   text = patch(
     text,
     `headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "clear_all" })`,
+        body: JSON.stringify({ action: "clear_all" }),`,
     `headers: authHeaders(),
-        body: JSON.stringify({ action: "clear_all" })`,
+        body: JSON.stringify({ action: "clear_all" }),`,
     "clear_all auth"
   );
 
-  // 4) Gmail delete with auth
+  // 4) Safety: strip any accidental double-headers left from older patch logic
+  text = text.replace(
+    /headers:\s*\{\s*["']Content-Type["']\s*:\s*["']application\/json["']\s*\}\s*,\s*\n\s*headers:\s*authHeaders\(\)/g,
+    "headers: authHeaders()"
+  );
+  // Also: headers on same line as body from bad partial patch
+  text = text.replace(
+    /headers:\s*\{\s*["']Content-Type["']\s*:\s*["']application\/json["']\s*\}\s*,\s*\n\s*headers:\s*authHeaders\(\),\s*body:/g,
+    "headers: authHeaders(),\n        body:"
+  );
+
+  // 5) Gmail delete with auth
   text = patch(
     text,
     `const res = await fetch(\`/api/gmail?id=\${id}\`, { method: "DELETE" });`,
@@ -125,7 +135,7 @@ try {
     "gmail delete auth"
   );
 
-  // 5) Campaign load with auth
+  // 6) Campaign load with auth
   text = patch(
     text,
     `const cRes = await fetch("/api/campaign");`,
@@ -133,10 +143,21 @@ try {
     "campaign list auth"
   );
 
+  // Final guard: fail build if duplicate headers still present in object literals
+  if (/headers:\s*\{[^}]*\}\s*,\s*\n\s*headers:\s*/.test(text)) {
+    console.error("FATAL: duplicate headers key still present in page.tsx");
+    process.exit(1);
+  }
+  if (/headers:\s*authHeaders\(\),\s*body:.*\n\s*headers:/.test(text)) {
+    console.error("FATAL: headers+body then another headers");
+    process.exit(1);
+  }
+
   fs.mkdirSync(path.dirname(OUT), { recursive: true });
   fs.writeFileSync(OUT, text);
   console.log("Wrote", OUT, text.length, "bytes");
 } catch (err) {
   console.error("rebuild-page failed:", err?.message || err);
   if (!fs.existsSync(OUT)) process.exit(1);
+  throw err;
 }
