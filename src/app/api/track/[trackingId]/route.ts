@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { queue, trackingLogs, settings } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import {
   recordOpenOnAutoSheet,
   recordOpenOnManualSheet,
 } from "@/app/services/googleSheets";
+import { MAIN_WORKSPACE, AMAZON_WORKSPACE } from "@/lib/workspace";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -15,7 +16,12 @@ const TRANSPARENT_PNG = Buffer.from(
   "base64"
 );
 
-const MANUAL_MAP_KEY = "manual_track_map";
+/** Manual map keys: main unprefixed, amazon → manual_track_map__amazon */
+const MANUAL_MAP_KEYS = [
+  "manual_track_map",
+  "manual_track_map__amazon",
+  "manual_track_map__main",
+];
 
 function pixelResponse() {
   return new NextResponse(TRANSPARENT_PNG, {
@@ -71,20 +77,46 @@ async function lookupManualMap(trackingId: string): Promise<{
   markName?: string;
   referenceNo?: string;
   subject?: string;
+  workspace?: string;
 } | null> {
   try {
-    const rows = await db
-      .select()
-      .from(settings)
-      .where(eq(settings.key, MANUAL_MAP_KEY))
-      .limit(1);
-    if (!rows.length) return null;
-    const map = JSON.parse(rows[0].value || "{}");
-    const entry = map[trackingId];
-    if (!entry || typeof entry !== "object") return null;
-    return entry;
+    for (const key of MANUAL_MAP_KEYS) {
+      const rows = await db
+        .select()
+        .from(settings)
+        .where(eq(settings.key, key))
+        .limit(1);
+      if (!rows.length) continue;
+      const map = JSON.parse(rows[0].value || "{}");
+      const entry = map[trackingId];
+      if (!entry || typeof entry !== "object") continue;
+      const wsFromKey = key.includes("__amazon")
+        ? AMAZON_WORKSPACE
+        : key.includes("__main")
+          ? MAIN_WORKSPACE
+          : MAIN_WORKSPACE;
+      return {
+        ...entry,
+        workspace: entry.workspace || wsFromKey,
+      };
+    }
+    return null;
   } catch {
     return null;
+  }
+}
+
+/** One-time-ish: attach workspace on old tracking_logs rows that match queue */
+async function backfillTrackingWorkspace(trackingId: string, ws: string) {
+  try {
+    await db.execute(
+      sql`UPDATE tracking_logs SET workspace = ${ws}
+          WHERE tracking_id = ${trackingId}
+            AND (workspace IS NULL OR workspace = '' OR workspace = 'main')
+            AND ${ws} <> 'main'`
+    );
+  } catch (e) {
+    // ignore — column may already be correct
   }
 }
 
@@ -105,7 +137,6 @@ export async function GET(
 
     if (!trackingId) return pixelResponse();
 
-    // Email baked into pixel URL: /api/track/{id}?e=user@domain.com
     let emailFromQuery: string | null = null;
     try {
       const q = request.nextUrl?.searchParams?.get("e") || "";
@@ -127,6 +158,8 @@ export async function GET(
 
     if (matchedQueue.length > 0) {
       const qItem = matchedQueue[0];
+      const ws =
+        String(qItem.workspace || "").trim().toLowerCase() || MAIN_WORKSPACE;
 
       try {
         await db
@@ -152,24 +185,36 @@ export async function GET(
           email: qItem.email || emailFromQuery || null,
           markName: qItem.markName || null,
           referenceNo: qItem.referenceNo || null,
+          workspace: ws,
         });
       } catch (e) {
         console.error("trackingLogs insert (queue) failed:", e);
       }
 
-      recordOpenOnAutoSheet(trackingId, openedAtIso).catch((err) =>
+      // Fix any older opens for this trackingId that landed on wrong workspace
+      await backfillTrackingWorkspace(trackingId, ws);
+
+      recordOpenOnAutoSheet(trackingId, openedAtIso, ws).catch((err) =>
         console.error("auto sheet open update failed:", err)
+      );
+
+      console.log(
+        `[TRACKING PIXEL] ws=${ws} trackId=${trackingId} email=${qItem.email || emailFromQuery || "-"} ip=${ipAddress}`
       );
     } else {
       let manualEmail: string | null = emailFromQuery;
       let manualMark: string | null = "Manual Send";
       let manualRef: string | null = "MANUAL";
+      let ws = MAIN_WORKSPACE;
 
       const fromMap = await lookupManualMap(trackingId);
       if (fromMap) {
         manualEmail = fromMap.email || manualEmail;
         manualMark = fromMap.markName || manualMark;
         manualRef = fromMap.referenceNo || manualRef;
+        if (fromMap.workspace) {
+          ws = String(fromMap.workspace).toLowerCase();
+        }
       }
 
       try {
@@ -197,15 +242,16 @@ export async function GET(
           email: manualEmail,
           markName: manualMark || "Manual Send",
           referenceNo: manualRef || "MANUAL",
+          workspace: ws,
         });
       } catch (e) {
         console.error("trackingLogs insert (manual) failed:", e);
       }
-    }
 
-    console.log(
-      `[TRACKING PIXEL] open trackId=${trackingId} email=${emailFromQuery || "-"} ip=${ipAddress}`
-    );
+      console.log(
+        `[TRACKING PIXEL] ws=${ws} (manual) trackId=${trackingId} email=${manualEmail || "-"} ip=${ipAddress}`
+      );
+    }
   } catch (error) {
     console.error("Error in open tracking route:", error);
   }
