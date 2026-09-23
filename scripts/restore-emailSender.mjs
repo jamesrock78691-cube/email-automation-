@@ -2,6 +2,7 @@
 /**
  * Restores emailSender.ts + workspace sheet updates +
  * Amazon: only mark_name + name | Main: full variable set.
+ * Always typed as Record<string, string> to satisfy compileTemplate.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -108,22 +109,12 @@ async function main() {
     "workspace sheet update"
   );
 
-  // Variables: Amazon = mark_name + name only; Main = full set
-  const OLD_VARS = `  const variables = {
-    reference_no: item.referenceNo || "",
-    serial_no: item.serialNo || "",
-    mark_name: item.markName || "",
-    filing_date: item.filingDate || "",
-    owner_name: (item.markName || "") + " Legal Owner",
-    client_name: (item.markName || "") + " Client",
-    email: item.email,
-    today: todayStr,
-    tracking_pixel: trackingPixelHtml,
-  };`;
-
-  const NEW_VARS = `  // Amazon workspace: only mark_name + name. Main: full set (unchanged).
-  const isAmazon = String(ws || "").toLowerCase() === AMAZON_WORKSPACE || String(ws || "").toLowerCase() === "amazon";
-  const variables = isAmazon
+  // Build variables as Record<string, string> — no ternary union (TS error fix)
+  const NEW_VARS = `  // Amazon: only mark_name + name. Main: full set. Typed as Record<string, string>.
+  const isAmazon =
+    String(ws || "").toLowerCase() === AMAZON_WORKSPACE ||
+    String(ws || "").toLowerCase() === "amazon";
+  const variables: Record<string, string> = isAmazon
     ? {
         mark_name: item.markName || "",
         name: item.referenceNo || "",
@@ -136,23 +127,50 @@ async function main() {
         filing_date: item.filingDate || "",
         owner_name: (item.markName || "") + " Legal Owner",
         client_name: (item.markName || "") + " Client",
-        email: item.email,
+        email: item.email || "",
         today: todayStr,
         tracking_pixel: trackingPixelHtml,
       };`;
 
+  const OLD_VARS = `  const variables = {
+    reference_no: item.referenceNo || "",
+    serial_no: item.serialNo || "",
+    mark_name: item.markName || "",
+    filing_date: item.filingDate || "",
+    owner_name: (item.markName || "") + " Legal Owner",
+    client_name: (item.markName || "") + " Client",
+    email: item.email,
+    today: todayStr,
+    tracking_pixel: trackingPixelHtml,
+  };`;
+
   if (text.includes(OLD_VARS)) {
     text = text.replace(OLD_VARS, NEW_VARS);
-    console.log("Patched: amazon-only vs main full variables");
-  } else if (text.includes("const isAmazon") && text.includes("AMAZON_WORKSPACE")) {
-    console.log("Amazon/main variables already present");
+    console.log("Patched: amazon/main variables (Record<string, string>)");
+  } else if (
+    text.includes("const variables: Record<string, string>") ||
+    text.includes("variables: Record<string, string>")
+  ) {
+    console.log("Typed variables already present");
   } else {
-    // Regex fallback if previous amazon-only patch left a short variables block
+    // Replace any previous variables block (including broken ternary)
     text = text.replace(
-      /const variables = \{[\s\S]*?tracking_pixel: trackingPixelHtml,\s*\};/,
-      NEW_VARS.replace(/^  /, "")
+      /(?:\/\/ Amazon[\s\S]*?\n)?\s*(?:const isAmazon[\s\S]*?\n)?\s*const variables(?:: Record<string, string>)?\s*=\s*[\s\S]*?tracking_pixel:\s*trackingPixelHtml,\s*\};/,
+      NEW_VARS
     );
     console.log("Patched variables via regex fallback");
+  }
+
+  // Extra safety: if still untyped ternary causing issues, force annotation
+  if (
+    text.includes("const variables =") &&
+    !text.includes("const variables: Record<string, string>")
+  ) {
+    text = text.replace(
+      "const variables =",
+      "const variables: Record<string, string> ="
+    );
+    console.log("Forced Record annotation on variables");
   }
 
   fs.mkdirSync(path.dirname(OUT), { recursive: true });
