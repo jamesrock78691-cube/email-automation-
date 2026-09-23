@@ -6,26 +6,48 @@ import { randomUUID } from "crypto";
 import { processNextQueueItem } from "@/app/services/emailSender";
 import { getAppBaseUrl } from "@/lib/trackingPixel";
 import { importPendingRowsToQueue } from "@/app/services/googleSheets";
-import { workspaceFromRequest, workspaceSql } from "@/lib/workspace";
+import {
+  requireSessionWorkspace,
+  workspaceSql,
+} from "@/lib/workspace";
 
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
+function unauthorized() {
+  return NextResponse.json(
+    { success: false, error: "Login required (workspace session missing)" },
+    { status: 401 }
+  );
+}
+
 export async function GET(request: NextRequest) {
   try {
-    const ws = workspaceFromRequest(request);
-    const list = await db.select().from(queue).where(workspaceSql(queue.workspace, ws)).orderBy(desc(queue.createdAt));
-    return NextResponse.json({ success: true, list });
+    const session = requireSessionWorkspace(request);
+    if (!session) return unauthorized();
+    const ws = session.workspace;
+    const list = await db
+      .select()
+      .from(queue)
+      .where(workspaceSql(queue.workspace, ws))
+      .orderBy(desc(queue.createdAt));
+    return NextResponse.json({ success: true, list, workspace: ws });
   } catch (error: any) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return NextResponse.json(
+      { success: false, error: error.message },
+      { status: 500 }
+    );
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
+    const session = requireSessionWorkspace(request);
+    if (!session) return unauthorized();
+    const ws = session.workspace;
+
     const body = await request.json();
     const { action, items, campaignId, templateId } = body;
-    const ws = workspaceFromRequest(request);
 
     const baseUrl =
       getAppBaseUrl(request) ||
@@ -35,9 +57,11 @@ export async function POST(request: NextRequest) {
         return `${protocol}://${host}`;
       })();
 
+    console.log(`[QUEUE] action=${action} ws=${ws} user=${session.username}`);
+
     if (action === "process_next") {
       const result = await processNextQueueItem(baseUrl, ws);
-      return NextResponse.json({ success: true, result });
+      return NextResponse.json({ success: true, result, workspace: ws });
     }
 
     if (action === "process_batch") {
@@ -56,6 +80,7 @@ export async function POST(request: NextRequest) {
         success: true,
         summary: `Processed ${results.length} items. Sent: ${successCount}, Failed: ${failCount}.`,
         results,
+        workspace: ws,
       });
     }
 
@@ -76,12 +101,25 @@ export async function POST(request: NextRequest) {
         let campaignTemplateId: number | null = null;
         let campaignSubject: string | null = null;
 
-        const cid = campaignId != null && campaignId !== "" ? Number(campaignId) : null;
+        const cid =
+          campaignId != null && campaignId !== "" ? Number(campaignId) : null;
         if (cid && !Number.isNaN(cid)) {
-          const camps = await db.select().from(campaigns).where(and(eq(campaigns.id, cid), workspaceSql(campaigns.workspace, ws))).limit(1);
+          const camps = await db
+            .select()
+            .from(campaigns)
+            .where(
+              and(
+                eq(campaigns.id, cid),
+                workspaceSql(campaigns.workspace, ws)
+              )
+            )
+            .limit(1);
           if (camps.length > 0) {
             validCampaignId = camps[0].id;
-            if (camps[0].templateId && validTemplateIds.has(camps[0].templateId)) {
+            if (
+              camps[0].templateId &&
+              validTemplateIds.has(camps[0].templateId)
+            ) {
               campaignTemplateId = camps[0].templateId;
               const tpl = allTemplates.find((t) => t.id === campaignTemplateId);
               campaignSubject = tpl?.subject || null;
@@ -102,7 +140,8 @@ export async function POST(request: NextRequest) {
             let rowTemplateId: number | null = null;
             if (it.templateId != null && it.templateId !== "") {
               const tid = Number(it.templateId);
-              if (!Number.isNaN(tid) && validTemplateIds.has(tid)) rowTemplateId = tid;
+              if (!Number.isNaN(tid) && validTemplateIds.has(tid))
+                rowTemplateId = tid;
             }
             if (rowTemplateId == null) rowTemplateId = fallbackTemplateId;
 
@@ -116,7 +155,10 @@ export async function POST(request: NextRequest) {
               cc: it.cc ? String(it.cc) : null,
               bcc: it.bcc ? String(it.bcc) : null,
               subject: String(
-                it.subject || campaignSubject || firstTemplate?.subject || "Trademark Notice"
+                it.subject ||
+                  campaignSubject ||
+                  firstTemplate?.subject ||
+                  "Trademark Notice"
               ),
               templateId: rowTemplateId,
               trackingId: randomUUID(),
@@ -138,8 +180,13 @@ export async function POST(request: NextRequest) {
           await db.insert(queue).values(rows);
         } catch (insertErr: any) {
           const msg =
-            insertErr?.cause?.message || insertErr?.message || "Failed to insert into queue";
-          return NextResponse.json({ success: false, error: msg }, { status: 500 });
+            insertErr?.cause?.message ||
+            insertErr?.message ||
+            "Failed to insert into queue";
+          return NextResponse.json(
+            { success: false, error: msg },
+            { status: 500 }
+          );
         }
 
         return NextResponse.json({
@@ -147,7 +194,8 @@ export async function POST(request: NextRequest) {
           count: rows.length,
           campaignId: validCampaignId,
           templateId: fallbackTemplateId,
-          message: `Imported ${rows.length} rows using campaign template #${fallbackTemplateId ?? "N/A"}`,
+          workspace: ws,
+          message: `Imported ${rows.length} rows (workspace=${ws}) template #${fallbackTemplateId ?? "N/A"}`,
         });
       }
 
@@ -159,10 +207,13 @@ export async function POST(request: NextRequest) {
         const result = await importPendingRowsToQueue(
           forcedId && !Number.isNaN(forcedId) ? forcedId : null
         );
-        return NextResponse.json(result);
+        return NextResponse.json({ ...result, workspace: ws });
       } catch (sheetErr: any) {
         return NextResponse.json(
-          { success: false, error: sheetErr?.message || "Sheets import failed" },
+          {
+            success: false,
+            error: sheetErr?.message || "Sheets import failed",
+          },
           { status: 500 }
         );
       }
@@ -179,10 +230,16 @@ export async function POST(request: NextRequest) {
           gmailUsedEmail: null,
           sentAt: null,
         })
-        .where(and(eq(queue.status, "failed"), workspaceSql(queue.workspace, ws)));
+        .where(
+          and(
+            eq(queue.status, "failed"),
+            workspaceSql(queue.workspace, ws)
+          )
+        );
       return NextResponse.json({
         success: true,
         message: "Only failed emails have been reset to pending status.",
+        workspace: ws,
       });
     }
 
@@ -190,7 +247,8 @@ export async function POST(request: NextRequest) {
       await db.delete(queue).where(workspaceSql(queue.workspace, ws));
       return NextResponse.json({
         success: true,
-        message: "Queue database tables cleared successfully.",
+        message: "Queue cleared for this workspace only.",
+        workspace: ws,
       });
     }
 
@@ -200,6 +258,9 @@ export async function POST(request: NextRequest) {
     );
   } catch (error: any) {
     console.error("Queue control route error:", error);
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return NextResponse.json(
+      { success: false, error: error.message },
+      { status: 500 }
+    );
   }
 }
