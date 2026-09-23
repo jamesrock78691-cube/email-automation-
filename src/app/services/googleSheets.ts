@@ -4,20 +4,40 @@ import { randomUUID } from "crypto";
 
 import { db } from "@/db";
 import { queue, templates } from "@/db/schema";
-import { inArray } from "drizzle-orm";
+import { inArray, and, eq } from "drizzle-orm";
+import { MAIN_WORKSPACE, AMAZON_WORKSPACE, workspaceSql } from "@/lib/workspace";
 
+/** Main (default) auto-import sheet */
 const SHEET_ID = process.env.GOOGLE_SHEET_ID || "";
 const SHEET_NAME = process.env.GOOGLE_SHEET_NAME || "";
+
+/** Amazon isolated sheet — hardcoded + env override */
+const AMAZON_SHEET_ID =
+  process.env.GOOGLE_SHEET_ID_AMAZON ||
+  "1geK0zxXyJ6voZ3hstLCEKZCekVcp_7-nhO2OqK3edqM";
+const AMAZON_SHEET_NAME =
+  process.env.GOOGLE_SHEET_NAME_AMAZON || "Amazon";
+
 const MANUAL_SHEET_ID = process.env.GOOGLE_MANUAL_LOG_SHEET_ID || "";
 const MANUAL_SHEET_NAME =
   process.env.GOOGLE_MANUAL_LOG_SHEET_NAME || "Manual Sent Log";
 const CREDS = process.env.GOOGLE_SHEETS_CREDENTIALS_JSON || "";
 
-let autoDoc: GoogleSpreadsheet | null = null;
-let autoInitialized = false;
+function resolveSheetConfig(ws?: string | null): { id: string; name: string } {
+  const w = String(ws || MAIN_WORKSPACE).toLowerCase();
+  if (w === AMAZON_WORKSPACE || w === "amazon") {
+    return { id: AMAZON_SHEET_ID, name: AMAZON_SHEET_NAME };
+  }
+  return { id: SHEET_ID, name: SHEET_NAME };
+}
+
+let auth: JWT | null = null;
+const docCache = new Map<
+  string,
+  { doc: GoogleSpreadsheet; loaded: boolean }
+>();
 let manualDoc: GoogleSpreadsheet | null = null;
 let manualInitialized = false;
-let auth: JWT | null = null;
 
 function ensureAuth() {
   if (!CREDS) {
@@ -42,24 +62,45 @@ function ensureAuth() {
   return auth;
 }
 
-async function getAutoSheet(opts?: { refresh?: boolean }) {
-  if (!SHEET_ID) throw new Error("GOOGLE_SHEET_ID is missing in Vercel env");
-  if (!SHEET_NAME) throw new Error("GOOGLE_SHEET_NAME is missing in Vercel env");
-  const jwt = ensureAuth();
-  if (!autoDoc) {
-    autoDoc = new GoogleSpreadsheet(SHEET_ID, jwt);
-  }
-  if (!autoInitialized || opts?.refresh) {
-    await autoDoc.loadInfo();
-    autoInitialized = true;
-  }
-  const sheet = autoDoc.sheetsByTitle[SHEET_NAME];
-  if (!sheet) {
-    const names = Object.keys(autoDoc.sheetsByTitle || {}).join(", ");
+async function getAutoSheet(
+  ws?: string | null,
+  opts?: { refresh?: boolean }
+) {
+  const { id, name } = resolveSheetConfig(ws);
+  if (!id) {
     throw new Error(
-      `Sheet tab "${SHEET_NAME}" not found. Available tabs: ${names || "(none)"}`
+      ws === AMAZON_WORKSPACE
+        ? "Amazon GOOGLE_SHEET_ID_AMAZON missing"
+        : "GOOGLE_SHEET_ID is missing in Vercel env"
     );
   }
+  if (!name) {
+    throw new Error(
+      ws === AMAZON_WORKSPACE
+        ? "Amazon sheet tab name missing"
+        : "GOOGLE_SHEET_NAME is missing in Vercel env"
+    );
+  }
+
+  const jwt = ensureAuth();
+  let entry = docCache.get(id);
+  if (!entry) {
+    entry = { doc: new GoogleSpreadsheet(id, jwt), loaded: false };
+    docCache.set(id, entry);
+  }
+  if (!entry.loaded || opts?.refresh) {
+    await entry.doc.loadInfo();
+    entry.loaded = true;
+  }
+
+  const sheet = entry.doc.sheetsByTitle[name];
+  if (!sheet) {
+    const names = Object.keys(entry.doc.sheetsByTitle || {}).join(", ");
+    throw new Error(
+      `Sheet tab "${name}" not found (workspace=${ws || "main"}). Available: ${names || "(none)"}`
+    );
+  }
+  console.log(`[SHEETS] workspace=${ws || "main"} id=${id.slice(0, 8)}… tab=${name}`);
   return sheet;
 }
 
@@ -129,10 +170,12 @@ type SheetCellPatch = {
   gmailUsed?: string;
 };
 
-/** One Sheets round-trip for many cells (no per-row save). */
-async function batchSetSheetCells(updates: SheetCellPatch[]) {
+async function batchSetSheetCells(
+  updates: SheetCellPatch[],
+  ws?: string | null
+) {
   if (!updates.length) return;
-  const sheet = await getAutoSheet();
+  const sheet = await getAutoSheet(ws);
   await sheet.loadHeaderRow();
   const headers: string[] = (sheet.headerValues || []).map((h: any) =>
     String(h || "")
@@ -190,8 +233,10 @@ async function batchSetSheetCells(updates: SheetCellPatch[]) {
   }
 }
 
-export async function readRows(): Promise<GoogleSheetRow[]> {
-  const sheet = await getAutoSheet();
+export async function readRows(
+  ws?: string | null
+): Promise<GoogleSheetRow[]> {
+  const sheet = await getAutoSheet(ws);
   const rows = await sheet.getRows();
 
   const pick = (row: any, ...keys: string[]) => {
@@ -219,7 +264,16 @@ export async function readRows(): Promise<GoogleSheetRow[]> {
     rowNumber: row.rowNumber,
     referenceNo: pick(row, "reference_no", "Reference No", "Reference", "ref"),
     serialNo: pick(row, "serial_no", "Serial No", "Serial", "serial"),
-    markName: pick(row, "mark_name", "Mark Name", "Mark", "trademark"),
+    // Amazon sheet has mark_name + name
+    markName: pick(
+      row,
+      "mark_name",
+      "Mark Name",
+      "Mark",
+      "trademark",
+      "name",
+      "Name"
+    ),
     filingDate: pick(row, "filing_date", "Filing Date", "Date"),
     email: pick(row, "Email", "email", "E-mail", "email address", "to"),
     cc: pick(row, "CC", "cc"),
@@ -243,23 +297,27 @@ export async function readRows(): Promise<GoogleSheetRow[]> {
 
 export async function updateRow(
   rowNumber: number,
-  values: Partial<GoogleSheetRow>
+  values: Partial<GoogleSheetRow>,
+  ws?: string | null
 ) {
-  await batchSetSheetCells([
-    {
-      rowNumber,
-      status: values.status,
-      trackingId: values.trackingId,
-      sentAt: values.sentAt,
-      openedAt: values.openedAt,
-      openCount: values.openCount,
-      gmailUsed: values.gmailUsed,
-    },
-  ]);
+  await batchSetSheetCells(
+    [
+      {
+        rowNumber,
+        status: values.status,
+        trackingId: values.trackingId,
+        sentAt: values.sentAt,
+        openedAt: values.openedAt,
+        openCount: values.openCount,
+        gmailUsed: values.gmailUsed,
+      },
+    ],
+    ws
+  );
 }
 
-export async function getPendingRows() {
-  const rows = await readRows();
+export async function getPendingRows(ws?: string | null) {
+  const rows = await readRows(ws);
   const pendingRows = rows.filter((row) => {
     const email = (row.email || "").trim();
     if (!email) return false;
@@ -271,17 +329,24 @@ export async function getPendingRows() {
     return true;
   });
   console.log(
-    `Sheet rows: ${rows.length}, pending to import: ${pendingRows.length}`
+    `[SHEETS] ws=${ws || "main"} rows=${rows.length} pending=${pendingRows.length}`
   );
   return pendingRows;
 }
 
-export async function importPendingRowsToQueue(forcedTemplateId?: number | null) {
+export async function importPendingRowsToQueue(
+  forcedTemplateId?: number | null,
+  ws: string = MAIN_WORKSPACE
+) {
   const t0 = Date.now();
-  await getAutoSheet({ refresh: true });
-  const rows = await getPendingRows();
+  await getAutoSheet(ws, { refresh: true });
+  const rows = await getPendingRows(ws);
 
-  const allTemplates = await db.select().from(templates);
+  // Templates only from this workspace
+  const allTemplates = await db
+    .select()
+    .from(templates)
+    .where(workspaceSql(templates.workspace, ws));
   const templatesByName = new Map(
     allTemplates.map((t) => [t.name.trim().toLowerCase(), t.id])
   );
@@ -315,7 +380,9 @@ export async function importPendingRowsToQueue(forcedTemplateId?: number | null)
         trackingId: queue.trackingId,
       })
       .from(queue)
-      .where(inArray(queue.serialNo, chunk));
+      .where(
+        and(inArray(queue.serialNo, chunk), workspaceSql(queue.workspace, ws))
+      );
     for (const e of existing) {
       if (e.serialNo) existingMap.set(e.serialNo.trim(), e.trackingId || "");
     }
@@ -332,15 +399,17 @@ export async function importPendingRowsToQueue(forcedTemplateId?: number | null)
         serialTrim ||
         `AUTO-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 
-      if (serialTrim && (existingMap.has(serialTrim) || seenSerial.has(serialTrim))) {
+      if (
+        serialTrim &&
+        (existingMap.has(serialTrim) || seenSerial.has(serialTrim))
+      ) {
         skipped++;
         const st = (row.status || "").trim().toLowerCase();
         if (!st || st === "pending") {
           sheetUpdates.push({
             rowNumber: row.rowNumber,
             status: "Imported",
-            trackingId:
-              existingMap.get(serialTrim) || row.trackingId || "",
+            trackingId: existingMap.get(serialTrim) || row.trackingId || "",
           });
         }
         continue;
@@ -348,7 +417,9 @@ export async function importPendingRowsToQueue(forcedTemplateId?: number | null)
 
       let templateId: number | null = null;
       if (row.templateName && row.templateName.trim()) {
-        const found = templatesByName.get(row.templateName.trim().toLowerCase());
+        const found = templatesByName.get(
+          row.templateName.trim().toLowerCase()
+        );
         if (found) templateId = found;
       }
       if (templateId == null) templateId = fallbackTemplateId;
@@ -373,6 +444,7 @@ export async function importPendingRowsToQueue(forcedTemplateId?: number | null)
         trackingId,
         tries: 0,
         maxTries: 3,
+        workspace: ws,
       });
       sheetUpdates.push({
         rowNumber: row.rowNumber,
@@ -401,7 +473,9 @@ export async function importPendingRowsToQueue(forcedTemplateId?: number | null)
         } catch (oneErr: any) {
           imported = Math.max(0, imported - 1);
           errors.push(
-            `${item.email}: ${oneErr?.cause?.message || oneErr?.message || "insert failed"}`
+            `${item.email}: ${
+              oneErr?.cause?.message || oneErr?.message || "insert failed"
+            }`
           );
         }
       }
@@ -409,21 +483,27 @@ export async function importPendingRowsToQueue(forcedTemplateId?: number | null)
   }
 
   try {
-    await batchSetSheetCells(sheetUpdates);
+    await batchSetSheetCells(sheetUpdates, ws);
   } catch (sheetErr: any) {
     console.error("batch sheet import update failed:", sheetErr);
     errors.push(
-      `Queue imported but sheet Status update failed: ${sheetErr?.message || sheetErr}`
+      `Queue imported but sheet Status update failed: ${
+        sheetErr?.message || sheetErr
+      }`
     );
   }
 
   const ms = Date.now() - t0;
+  const cfg = resolveSheetConfig(ws);
   return {
     success: errors.length === 0,
     imported,
     skipped,
     errors,
-    message: `Imported ${imported}, skipped ${skipped}${
+    workspace: ws,
+    sheetId: cfg.id,
+    sheetName: cfg.name,
+    message: `Imported ${imported} from "${cfg.name}" (ws=${ws}), skipped ${skipped}${
       errors.length ? `, errors ${errors.length}` : ""
     } in ${Math.round(ms / 100) / 10}s`,
   };
@@ -483,52 +563,59 @@ export async function appendManualSentLog(data: ManualLogRow) {
   }
 }
 
-/** Increment open count on auto (queue) Google Sheet by tracking ID */
+/** Increment open count on auto sheet by tracking ID (tries both workspaces). */
 export async function recordOpenOnAutoSheet(
   trackingId: string,
-  openedAtIso?: string
+  openedAtIso?: string,
+  preferredWs?: string | null
 ) {
-  try {
-    if (!SHEET_ID || !trackingId) return { success: false };
-    const sheet = await getAutoSheet();
-    const rows = await sheet.getRows();
-    const id = String(trackingId).trim();
-    const openedAt = openedAtIso || new Date().toISOString();
+  const tryWs = preferredWs
+    ? [preferredWs]
+    : [MAIN_WORKSPACE, AMAZON_WORKSPACE];
 
-    for (const row of rows as any[]) {
-      const pick = (...keys: string[]) => {
-        for (const k of keys) {
-          const v = row.get(k);
-          if (v !== undefined && v !== null && String(v).trim() !== "") {
-            return String(v).trim();
+  for (const ws of tryWs) {
+    try {
+      const cfg = resolveSheetConfig(ws);
+      if (!cfg.id || !trackingId) continue;
+      const sheet = await getAutoSheet(ws);
+      const rows = await sheet.getRows();
+      const id = String(trackingId).trim();
+      const openedAt = openedAtIso || new Date().toISOString();
+
+      for (const row of rows as any[]) {
+        const pick = (...keys: string[]) => {
+          for (const k of keys) {
+            const v = row.get(k);
+            if (v !== undefined && v !== null && String(v).trim() !== "") {
+              return String(v).trim();
+            }
           }
-        }
-        return "";
-      };
-      const tid = pick("Tracking ID", "tracking_id", "Tracking Id");
-      if (tid !== id) continue;
+          return "";
+        };
+        const tid = pick("Tracking ID", "tracking_id", "Tracking Id");
+        if (tid !== id) continue;
 
-      const prev = parseInt(pick("Open Count", "open_count") || "0", 10);
-      const next = (Number.isFinite(prev) ? prev : 0) + 1;
-      row.set("Open Count", String(next));
-      row.set("Opened At", openedAt);
-      await row.save();
-      return {
-        success: true,
-        openCount: next,
-        email: pick("Email", "email"),
-        referenceNo: pick("reference_no", "Reference No", "Reference"),
-        markName: pick("mark_name", "Mark Name", "Mark"),
-      };
+        const prev = parseInt(pick("Open Count", "open_count") || "0", 10);
+        const next = (Number.isFinite(prev) ? prev : 0) + 1;
+        row.set("Open Count", String(next));
+        row.set("Opened At", openedAt);
+        await row.save();
+        return {
+          success: true,
+          openCount: next,
+          email: pick("Email", "email"),
+          referenceNo: pick("reference_no", "Reference No", "Reference"),
+          markName: pick("mark_name", "Mark Name", "Mark", "name"),
+          workspace: ws,
+        };
+      }
+    } catch (err: any) {
+      console.error(`recordOpenOnAutoSheet ws=${ws}:`, err?.message || err);
     }
-    return { success: false, error: "tracking id not found on auto sheet" };
-  } catch (err: any) {
-    console.error("recordOpenOnAutoSheet error:", err);
-    return { success: false, error: err?.message || String(err) };
   }
+  return { success: false, error: "tracking id not found on auto sheet" };
 }
 
-/** Increment open count on manual sent log Google Sheet by tracking ID */
 export async function recordOpenOnManualSheet(
   trackingId: string,
   openedAtIso?: string
@@ -548,18 +635,6 @@ export async function recordOpenOnManualSheet(
             return String(v).trim();
           }
         }
-        try {
-          const obj = row.toObject ? row.toObject() : {};
-          for (const [hk, hv] of Object.entries(obj)) {
-            if (
-              keys.some((k) => k.trim().toLowerCase() === String(hk).trim().toLowerCase()) &&
-              hv != null &&
-              String(hv).trim()
-            ) {
-              return String(hv).trim();
-            }
-          }
-        } catch {}
         return "";
       };
       const tid = pick("Tracking ID", "tracking_id", "Tracking Id");
