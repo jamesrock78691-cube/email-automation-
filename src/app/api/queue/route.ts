@@ -204,8 +204,10 @@ export async function POST(request: NextRequest) {
           templateId != null && templateId !== ""
             ? Number(templateId)
             : null;
+        // Amazon → Amazon sheet; main → main sheet
         const result = await importPendingRowsToQueue(
-          forcedId && !Number.isNaN(forcedId) ? forcedId : null
+          forcedId && !Number.isNaN(forcedId) ? forcedId : null,
+          ws
         );
         return NextResponse.json({ ...result, workspace: ws });
       } catch (sheetErr: any) {
