@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Restores page.tsx + auth headers + only mark_name / name variables.
+ * Restores page.tsx + auth headers.
+ * Template vars: Amazon sees only mark_name+name; main keeps full set.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -72,11 +73,18 @@ try {
   );
   text = patch(
     text,
+    `headers: { "Content-Type": "application/json" },\n            body: JSON.stringify({ action: "process_next" }),`,
+    `headers: authHeaders(),\n            body: JSON.stringify({ action: "process_next" }),`,
+    "process_next auth (12-space)"
+  );
+  // Fix escaped newlines - use real newlines
+  text = patch(
+    text,
     `headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ action: "process_next" }),`,
     `headers: authHeaders(),
             body: JSON.stringify({ action: "process_next" }),`,
-    "process_next auth (12-space)"
+    "process_next auth (12-space real)"
   );
   text = patch(
     text,
@@ -127,7 +135,8 @@ try {
     "campaign list auth"
   );
 
-  // 3) Compose variables — only mark_name + name
+  // 3) Keep FULL compose variables for main (do NOT strip)
+  // Add name field alongside existing ones for Amazon
   text = patch(
     text,
     `const [composeVariables, setComposeVariables] = useState({
@@ -139,19 +148,52 @@ try {
   today: new Date().toISOString().slice(0, 10),
 });`,
     `const [composeVariables, setComposeVariables] = useState({
+  reference_no: "",
+  serial_no: "",
   mark_name: "",
   name: "",
+  filing_date: "",
+  email: "",
+  today: new Date().toISOString().slice(0, 10),
 });`,
-    "composeVariables state"
+    "composeVariables + name field"
   );
 
+  // isAmazon helper after authUser state
+  text = patch(
+    text,
+    `  const [authUser, setAuthUser] = useState<{
+    id: number;
+    username: string;
+    role: string;
+    permissions?: string[];
+    stats?: { totalSent: number; sentToday: number; dailyLimit: number };
+  } | null>(null);`,
+    `  const [authUser, setAuthUser] = useState<{
+    id: number;
+    username: string;
+    role: string;
+    workspace?: string;
+    permissions?: string[];
+    stats?: { totalSent: number; sentToday: number; dailyLimit: number };
+  } | null>(null);
+  const isAmazonWs =
+    String(authUser?.workspace || "").toLowerCase() === "amazon" ||
+    String(authUser?.username || "").toLowerCase() === "amazon";`,
+    "isAmazonWs helper"
+  );
+
+  // Help text depends on workspace
   text = patch(
     text,
     `Ye values template ke {"{{reference_no}}"}, {"{{serial_no}}"}, {"{{mark_name}}"} etc. mein auto fill hongi.`,
-    `Template mein sirf {"{{mark_name}}"} aur {"{{name}}"} use karo.`,
+    `{isAmazonWs
+              ? <>Amazon templates: sirf {"{{mark_name}}"} aur {"{{name}}"}</>
+              : <>Ye values template ke {"{{reference_no}}"}, {"{{serial_no}}"}, {"{{mark_name}}"} etc. mein auto fill hongi.</>}`,
     "variables help text"
   );
 
+  // Clear keeps full set + name
   text = patch(
     text,
     `            setComposeVariables({
@@ -163,8 +205,13 @@ try {
               today: new Date().toISOString().slice(0, 10),
             });`,
     `            setComposeVariables({
+              reference_no: "",
+              serial_no: "",
               mark_name: "",
               name: "",
+              filing_date: "",
+              email: "",
+              today: new Date().toISOString().slice(0, 10),
             });`,
     "clear variables"
   );
@@ -179,11 +226,19 @@ try {
   filing_date: "",
   email: "",
 }));`,
-    `setComposeVariables({ mark_name: "", name: "" });`,
+    `setComposeVariables((prev) => ({
+  ...prev,
+  reference_no: "",
+  serial_no: "",
+  mark_name: "",
+  name: "",
+  filing_date: "",
+  email: "",
+}));`,
     "clear after send"
   );
 
-  // Apply variables — only mark_name + name aliases
+  // applyVariables — keep main aliases + name
   text = patch(
     text,
     `    // also support common aliases
@@ -193,31 +248,73 @@ try {
     out = out.replace(/\\{\\{filing_date\\}\\}/gi, vars.filing_date || "");
     out = out.replace(/\\{\\{email\\}\\}/gi, vars.email || vars.email || "");
     out = out.replace(/\\{\\{today\\}\\}/gi, vars.today || new Date().toISOString().slice(0, 10));`,
-    `    out = out.replace(/\\{\\{mark_name\\}\\}/gi, vars.mark_name || "");
-    out = out.replace(/\\{\\{name\\}\\}/gi, vars.name || "");`,
-    "applyVariables aliases"
+    `    out = out.replace(/\\{\\{reference_no\\}\\}/gi, vars.reference_no || "");
+    out = out.replace(/\\{\\{serial_no\\}\\}/gi, vars.serial_no || "");
+    out = out.replace(/\\{\\{mark_name\\}\\}/gi, vars.mark_name || "");
+    out = out.replace(/\\{\\{name\\}\\}/gi, vars.name || "");
+    out = out.replace(/\\{\\{filing_date\\}\\}/gi, vars.filing_date || "");
+    out = out.replace(/\\{\\{email\\}\\}/gi, vars.email || "");
+    out = out.replace(/\\{\\{today\\}\\}/gi, vars.today || new Date().toISOString().slice(0, 10));`,
+    "applyVariables + name"
   );
 
-  // Replace the whole variables input grid with only mark_name + name
-  const gridStart = `      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">`;
-  const gridEnd = `      </div>
+  // Inject name field after Mark Name field; hide non-amazon fields when isAmazonWs
+  // Reference No block → only for main
+  text = patch(
+    text,
+    `      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+       <div>
+  <label className="text-xs font-medium text-gray-700 flex items-center gap-1.5">
+    Reference No`,
+    `      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+       {!isAmazonWs && (<div>
+  <label className="text-xs font-medium text-gray-700 flex items-center gap-1.5">
+    Reference No`,
+    "hide Reference No on amazon"
+  );
 
-      {/* Template selector */}`;
-  const gi = text.indexOf(gridStart);
-  const ge = text.indexOf(gridEnd);
-  if (gi >= 0 && ge > gi) {
-    const simpleGrid = `      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+  // Close Reference No div and Serial No — find Serial No block and wrap
+  text = patch(
+    text,
+    `  <p className="text-[10px] text-gray-500 mt-0.5">Template select karte hi auto milta hai (1111 se shuru)</p>
+</div>
         <div>
-          <label className="text-xs font-medium text-gray-700">mark_name</label>
-          <input
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 mt-1 bg-white text-gray-900 text-sm"
-            value={composeVariables.mark_name}
-            onChange={(e) => handleVariableChange("mark_name", e.target.value)}
-            placeholder="{{mark_name}}"
+          <label className="text-xs font-medium text-gray-700">Serial No</label>`,
+    `  <p className="text-[10px] text-gray-500 mt-0.5">Template select karte hi auto milta hai (1111 se shuru)</p>
+</div>)}
+        {!isAmazonWs && (<div>
+          <label className="text-xs font-medium text-gray-700">Serial No</label>`,
+    "hide Serial No on amazon"
+  );
+
+  text = patch(
+    text,
+    `            placeholder="90812354"
           />
         </div>
         <div>
-          <label className="text-xs font-medium text-gray-700">name</label>
+          <label className="text-xs font-medium text-gray-700">Mark Name</label>`,
+    `            placeholder="90812354"
+          />
+        </div>)}
+        <div>
+          <label className="text-xs font-medium text-gray-700">{isAmazonWs ? "mark_name" : "Mark Name"}</label>`,
+    "close serial hide + mark label"
+  );
+
+  // After Mark Name input, insert name field (always visible for amazon, optional for main)
+  text = patch(
+    text,
+    `            placeholder="GLOW-TECH INDUSTRIES"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-medium text-gray-700">Filing Date</label>`,
+    `            placeholder="GLOW-TECH INDUSTRIES"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-medium text-gray-700">{isAmazonWs ? "name" : "Name"}</label>
           <input
             className="w-full border border-gray-300 rounded-lg px-3 py-2 mt-1 bg-white text-gray-900 text-sm"
             value={composeVariables.name}
@@ -225,61 +322,68 @@ try {
             placeholder="{{name}}"
           />
         </div>
-      </div>
+        {!isAmazonWs && (<div>
+          <label className="text-xs font-medium text-gray-700">Filing Date</label>`,
+    "name field + hide filing on amazon"
+  );
 
-      {/* Template selector */}`;
-    text = text.slice(0, gi) + simpleGrid + text.slice(ge + gridEnd.length - gridEnd.length);
-    // Fix: ge points to start of gridEnd, so replace [gi, ge) + keep gridEnd
-    text = text.slice(0, gi) + simpleGrid + text.slice(ge);
-    // Wait - we already included gridEnd in simpleGrid. So use ge only once.
-    // Redo properly:
-  }
-  // Clean redo of grid replace
-  {
-    const gi2 = text.indexOf(`      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">`);
-    const ge2 = text.indexOf(`      {/* Template selector */}`);
-    if (gi2 >= 0 && ge2 > gi2) {
-      const simpleGrid = `      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <div>
-          <label className="text-xs font-medium text-gray-700">mark_name</label>
-          <input
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 mt-1 bg-white text-gray-900 text-sm"
-            value={composeVariables.mark_name}
-            onChange={(e) => handleVariableChange("mark_name", e.target.value)}
-            placeholder="{{mark_name}}"
+  text = patch(
+    text,
+    `            placeholder="e.g. 15 Jan 2026 or 2026-01-15"
           />
         </div>
         <div>
-          <label className="text-xs font-medium text-gray-700">name</label>
-          <input
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 mt-1 bg-white text-gray-900 text-sm"
-            value={composeVariables.name}
-            onChange={(e) => handleVariableChange("name", e.target.value)}
-            placeholder="{{name}}"
+          <label className="text-xs font-medium text-gray-700">Email (variable)</label>`,
+    `            placeholder="e.g. 15 Jan 2026 or 2026-01-15"
+          />
+        </div>)}
+        {!isAmazonWs && (<div>
+          <label className="text-xs font-medium text-gray-700">Email (variable)</label>`,
+    "hide email var on amazon"
+  );
+
+  text = patch(
+    text,
+    `            placeholder="client@example.com"
           />
         </div>
-      </div>
+        <div>
+          <label className="text-xs font-medium text-gray-700">Today</label>`,
+    `            placeholder="client@example.com"
+          />
+        </div>)}
+        {!isAmazonWs && (<div>
+          <label className="text-xs font-medium text-gray-700">Today</label>`,
+    "hide today on amazon"
+  );
 
-      `;
-      text = text.slice(0, gi2) + simpleGrid + text.slice(ge2);
-      console.log("Patched: variables grid → mark_name + name only");
-    } else {
-      console.log("Skip: variables grid not found");
-    }
-  }
+  text = patch(
+    text,
+    `            onChange={(e) => handleVariableChange("today", e.target.value)}
+          />
+        </div>
+      </div>`,
+    `            onChange={(e) => handleVariableChange("today", e.target.value)}
+          />
+        </div>)}
+      </div>`,
+    "close today hide"
+  );
 
-  // Manual send body: map name → referenceNo, mark_name → markName
+  // Manual send: Amazon uses name → referenceNo
   text = patch(
     text,
     `        referenceNo: composeVariables?.reference_no || "",
 serialNo: composeVariables?.serial_no || "",
 markName: composeVariables?.mark_name || "",
 filingDate: composeVariables?.filing_date || "",`,
-    `        referenceNo: composeVariables?.name || "",
-serialNo: "",
+    `        referenceNo: isAmazonWs
+          ? composeVariables?.name || ""
+          : composeVariables?.reference_no || "",
+serialNo: isAmazonWs ? "" : composeVariables?.serial_no || "",
 markName: composeVariables?.mark_name || "",
-filingDate: "",`,
-    "manual send var map"
+filingDate: isAmazonWs ? "" : composeVariables?.filing_date || "",`,
+    "manual send var map amazon vs main"
   );
 
   if (/headers:\s*\{[^}]*\}\s*,\s*\n\s*headers:\s*/.test(text)) {
