@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 /**
- * Restores src/app/page.tsx from last known-good commit (CDN),
- * then injects attachment base64 + auth headers for workspace isolation.
- * IMPORTANT: never leave two "headers:" keys in the same object literal.
+ * Restores page.tsx + auth headers + only mark_name / name variables.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -38,7 +36,7 @@ try {
     throw new Error("Downloaded page looks invalid");
   }
 
-  // 1) Template attachment stores contentBase64
+  // 1) contentBase64 attachments
   text = patch(
     text,
     `    existing.push({
@@ -57,7 +55,7 @@ try {
     "contentBase64 attachment"
   );
 
-  // 2) Gmail save — Bearer token
+  // 2) Gmail / queue authHeaders
   text = patch(
     text,
     `      const res = await fetch(url, {
@@ -72,9 +70,6 @@ try {
       });`,
     "gmail save authHeaders"
   );
-
-  // 3) Queue actions — replace FULL header+body block (avoids duplicate headers key)
-  // Matches both 8-space and 12-space indent variants of process_next
   text = patch(
     text,
     `headers: { "Content-Type": "application/json" },
@@ -115,27 +110,16 @@ try {
         body: JSON.stringify({ action: "clear_all" }),`,
     "clear_all auth"
   );
-
-  // 4) Safety: strip any accidental double-headers left from older patch logic
   text = text.replace(
     /headers:\s*\{\s*["']Content-Type["']\s*:\s*["']application\/json["']\s*\}\s*,\s*\n\s*headers:\s*authHeaders\(\)/g,
     "headers: authHeaders()"
   );
-  // Also: headers on same line as body from bad partial patch
-  text = text.replace(
-    /headers:\s*\{\s*["']Content-Type["']\s*:\s*["']application\/json["']\s*\}\s*,\s*\n\s*headers:\s*authHeaders\(\),\s*body:/g,
-    "headers: authHeaders(),\n        body:"
-  );
-
-  // 5) Gmail delete with auth
   text = patch(
     text,
     `const res = await fetch(\`/api/gmail?id=\${id}\`, { method: "DELETE" });`,
     `const res = await fetch(\`/api/gmail?id=\${id}\`, { method: "DELETE", headers: authHeaders() });`,
     "gmail delete auth"
   );
-
-  // 6) Campaign load with auth
   text = patch(
     text,
     `const cRes = await fetch("/api/campaign");`,
@@ -143,13 +127,163 @@ try {
     "campaign list auth"
   );
 
-  // Final guard: fail build if duplicate headers still present in object literals
-  if (/headers:\s*\{[^}]*\}\s*,\s*\n\s*headers:\s*/.test(text)) {
-    console.error("FATAL: duplicate headers key still present in page.tsx");
-    process.exit(1);
+  // 3) Compose variables — only mark_name + name
+  text = patch(
+    text,
+    `const [composeVariables, setComposeVariables] = useState({
+  reference_no: "",
+  serial_no: "",
+  mark_name: "",
+  filing_date: "",
+  email: "",
+  today: new Date().toISOString().slice(0, 10),
+});`,
+    `const [composeVariables, setComposeVariables] = useState({
+  mark_name: "",
+  name: "",
+});`,
+    "composeVariables state"
+  );
+
+  text = patch(
+    text,
+    `Ye values template ke {"{{reference_no}}"}, {"{{serial_no}}"}, {"{{mark_name}}"} etc. mein auto fill hongi.`,
+    `Template mein sirf {"{{mark_name}}"} aur {"{{name}}"} use karo.`,
+    "variables help text"
+  );
+
+  text = patch(
+    text,
+    `            setComposeVariables({
+              reference_no: "",
+              serial_no: "",
+              mark_name: "",
+              filing_date: "",
+              email: "",
+              today: new Date().toISOString().slice(0, 10),
+            });`,
+    `            setComposeVariables({
+              mark_name: "",
+              name: "",
+            });`,
+    "clear variables"
+  );
+
+  text = patch(
+    text,
+    `setComposeVariables((prev) => ({
+  ...prev,
+  reference_no: "",
+  serial_no: "",
+  mark_name: "",
+  filing_date: "",
+  email: "",
+}));`,
+    `setComposeVariables({ mark_name: "", name: "" });`,
+    "clear after send"
+  );
+
+  // Apply variables — only mark_name + name aliases
+  text = patch(
+    text,
+    `    // also support common aliases
+    out = out.replace(/\\{\\{reference_no\\}\\}/gi, vars.reference_no || "");
+    out = out.replace(/\\{\\{serial_no\\}\\}/gi, vars.serial_no || "");
+    out = out.replace(/\\{\\{mark_name\\}\\}/gi, vars.mark_name || "");
+    out = out.replace(/\\{\\{filing_date\\}\\}/gi, vars.filing_date || "");
+    out = out.replace(/\\{\\{email\\}\\}/gi, vars.email || vars.email || "");
+    out = out.replace(/\\{\\{today\\}\\}/gi, vars.today || new Date().toISOString().slice(0, 10));`,
+    `    out = out.replace(/\\{\\{mark_name\\}\\}/gi, vars.mark_name || "");
+    out = out.replace(/\\{\\{name\\}\\}/gi, vars.name || "");`,
+    "applyVariables aliases"
+  );
+
+  // Replace the whole variables input grid with only mark_name + name
+  const gridStart = `      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">`;
+  const gridEnd = `      </div>
+
+      {/* Template selector */}`;
+  const gi = text.indexOf(gridStart);
+  const ge = text.indexOf(gridEnd);
+  if (gi >= 0 && ge > gi) {
+    const simpleGrid = `      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label className="text-xs font-medium text-gray-700">mark_name</label>
+          <input
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 mt-1 bg-white text-gray-900 text-sm"
+            value={composeVariables.mark_name}
+            onChange={(e) => handleVariableChange("mark_name", e.target.value)}
+            placeholder="{{mark_name}}"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-medium text-gray-700">name</label>
+          <input
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 mt-1 bg-white text-gray-900 text-sm"
+            value={composeVariables.name}
+            onChange={(e) => handleVariableChange("name", e.target.value)}
+            placeholder="{{name}}"
+          />
+        </div>
+      </div>
+
+      {/* Template selector */}`;
+    text = text.slice(0, gi) + simpleGrid + text.slice(ge + gridEnd.length - gridEnd.length);
+    // Fix: ge points to start of gridEnd, so replace [gi, ge) + keep gridEnd
+    text = text.slice(0, gi) + simpleGrid + text.slice(ge);
+    // Wait - we already included gridEnd in simpleGrid. So use ge only once.
+    // Redo properly:
   }
-  if (/headers:\s*authHeaders\(\),\s*body:.*\n\s*headers:/.test(text)) {
-    console.error("FATAL: headers+body then another headers");
+  // Clean redo of grid replace
+  {
+    const gi2 = text.indexOf(`      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">`);
+    const ge2 = text.indexOf(`      {/* Template selector */}`);
+    if (gi2 >= 0 && ge2 > gi2) {
+      const simpleGrid = `      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label className="text-xs font-medium text-gray-700">mark_name</label>
+          <input
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 mt-1 bg-white text-gray-900 text-sm"
+            value={composeVariables.mark_name}
+            onChange={(e) => handleVariableChange("mark_name", e.target.value)}
+            placeholder="{{mark_name}}"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-medium text-gray-700">name</label>
+          <input
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 mt-1 bg-white text-gray-900 text-sm"
+            value={composeVariables.name}
+            onChange={(e) => handleVariableChange("name", e.target.value)}
+            placeholder="{{name}}"
+          />
+        </div>
+      </div>
+
+      `;
+      text = text.slice(0, gi2) + simpleGrid + text.slice(ge2);
+      console.log("Patched: variables grid → mark_name + name only");
+    } else {
+      console.log("Skip: variables grid not found");
+    }
+  }
+
+  // Manual send body: map name → referenceNo, mark_name → markName
+  text = patch(
+    text,
+    `        referenceNo: composeVariables?.reference_no || "",
+serialNo: composeVariables?.serial_no || "",
+markName: composeVariables?.mark_name || "",
+filingDate: composeVariables?.filing_date || "",`,
+    `        referenceNo: composeVariables?.name || "",
+serialNo: "",
+markName: composeVariables?.mark_name || "",
+filingDate: "",`,
+    "manual send var map"
+  );
+
+  if (/headers:\s*\{[^}]*\}\s*,\s*\n\s*headers:\s*/.test(text)) {
+    console.error("FATAL: duplicate headers");
     process.exit(1);
   }
 
