@@ -28,25 +28,56 @@ export function workspaceSql(column: any, ws: string): SQL {
   return eq(column, w) as SQL;
 }
 
-/** Read workspace from session token (Bearer or cookie). */
-export function workspaceFromRequest(req: {
-  headers: { get: (k: string) => string | null };
-  cookies?: { get: (k: string) => { value: string } | undefined };
-}): string {
+function parseTokenWorkspace(token: string): {
+  username: string;
+  workspace: string;
+} | null {
   try {
-    const auth = req.headers.get("authorization");
-    const token = auth?.startsWith("Bearer ")
-      ? auth.slice(7).trim()
-      : req.cookies?.get?.("ea_session")?.value || "";
-    if (!token || !token.includes(".")) return MAIN_WORKSPACE;
+    if (!token || !token.includes(".")) return null;
     const payloadB64 = token.split(".")[0];
     const json = Buffer.from(
       payloadB64.replace(/-/g, "+").replace(/_/g, "/"),
       "base64"
     ).toString("utf8");
     const data = JSON.parse(json);
-    return resolveWorkspace(data.username, data.workspace);
+    if (!data || !data.username) return null;
+    return {
+      username: String(data.username),
+      workspace: resolveWorkspace(data.username, data.workspace),
+    };
   } catch {
-    return MAIN_WORKSPACE;
+    return null;
   }
+}
+
+function tokenFromRequest(req: {
+  headers: { get: (k: string) => string | null };
+  cookies?: { get: (k: string) => { value: string } | undefined };
+}): string {
+  const auth = req.headers.get("authorization");
+  if (auth?.startsWith("Bearer ")) return auth.slice(7).trim();
+  return req.cookies?.get?.("ea_session")?.value || "";
+}
+
+/**
+ * Read workspace from session. Returns MAIN only if token is missing/invalid.
+ * Prefer requireSessionWorkspace for mutating routes.
+ */
+export function workspaceFromRequest(req: {
+  headers: { get: (k: string) => string | null };
+  cookies?: { get: (k: string) => { value: string } | undefined };
+}): string {
+  const parsed = parseTokenWorkspace(tokenFromRequest(req));
+  return parsed?.workspace || MAIN_WORKSPACE;
+}
+
+/**
+ * Require a valid session token. Returns null if not logged in.
+ * Use this for send/queue/gmail so anonymous never hits main data by accident.
+ */
+export function requireSessionWorkspace(req: {
+  headers: { get: (k: string) => string | null };
+  cookies?: { get: (k: string) => { value: string } | undefined };
+}): { username: string; workspace: string } | null {
+  return parseTokenWorkspace(tokenFromRequest(req));
 }
