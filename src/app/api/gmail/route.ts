@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { gmailAccounts, settings } from "@/db/schema";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, and } from "drizzle-orm";
 import { createHmac, timingSafeEqual } from "crypto";
 import { shouldResetDailyQuota } from "@/lib/dailyQuota";
+import { workspaceFromRequest, workspaceSql, resolveWorkspace } from "@/lib/workspace";
 
 const SECRET =
   process.env.AUTH_SECRET ||
@@ -14,6 +15,7 @@ function verifyToken(token: string): {
   userId: number;
   username: string;
   role: string;
+  workspace?: string;
 } | null {
   try {
     if (!token || !token.includes(".")) return null;
@@ -34,6 +36,7 @@ function verifyToken(token: string): {
       userId: payload.userId,
       username: payload.username || "",
       role: payload.role || "operator",
+      workspace: payload.workspace,
     };
   } catch {
     return null;
@@ -62,12 +65,14 @@ function normalizeRole(role: string, username?: string) {
   return "operator";
 }
 
-async function getSmtpAssignments(): Promise<Record<string, number[]>> {
+async function getSmtpAssignments(ws: string): Promise<Record<string, number[]>> {
   try {
+    const key =
+      !ws || ws === "main" ? "smtp_assignments" : `smtp_assignments__${ws}`;
     const rows = await db
       .select()
       .from(settings)
-      .where(eq(settings.key, "smtp_assignments"))
+      .where(eq(settings.key, key))
       .limit(1);
     if (!rows.length) return {};
     const map = JSON.parse(rows[0].value || "{}");
@@ -89,10 +94,11 @@ export async function GET(request: NextRequest) {
     }
 
     const role = normalizeRole(session.role, session.username);
+    const ws = resolveWorkspace(session.username, session.workspace);
     let list: any[] = [];
 
     if (role === "operator") {
-      const assignments = await getSmtpAssignments();
+      const assignments = await getSmtpAssignments(ws);
       const allowedIds: number[] = (
         assignments[String(session.userId)] ||
         assignments[session.username] ||
@@ -105,29 +111,35 @@ export async function GET(request: NextRequest) {
         list = await db
           .select()
           .from(gmailAccounts)
-          .where(inArray(gmailAccounts.id, allowedIds))
+          .where(
+            and(
+              inArray(gmailAccounts.id, allowedIds),
+              workspaceSql(gmailAccounts.workspace, ws)
+            )
+          )
           .orderBy(gmailAccounts.id);
       } else {
         list = [];
       }
 
-      // Always strip password for operators
       list = list.map((a) => {
         const { appPassword, ...rest } = a;
         return rest;
       });
     } else {
-      // admin / super_admin see everything
-      list = await db.select().from(gmailAccounts).orderBy(gmailAccounts.id);
+      list = await db
+        .select()
+        .from(gmailAccounts)
+        .where(workspaceSql(gmailAccounts.workspace, ws))
+        .orderBy(gmailAccounts.id);
     }
 
-    // Lazy daily reset at 07:00 Asia/Karachi so UI shows correct remaining.
-    // Manual "disabled" stays disabled — only temporary cooldown auto-revives.
     const now = new Date();
     for (let i = 0; i < list.length; i++) {
       const acc = list[i];
       if (acc.status === "cooldown") {
-        const coolDone = !acc.cooldownUntil || new Date(acc.cooldownUntil) <= now;
+        const coolDone =
+          !acc.cooldownUntil || new Date(acc.cooldownUntil) <= now;
         if (coolDone) {
           try {
             await db
@@ -135,7 +147,9 @@ export async function GET(request: NextRequest) {
               .set({ status: "enabled", cooldownUntil: null })
               .where(eq(gmailAccounts.id, acc.id));
             list[i] = { ...list[i], status: "enabled", cooldownUntil: null };
-          } catch { /* ignore */ }
+          } catch {
+            /* ignore */
+          }
         }
       }
       if (shouldResetDailyQuota(acc.lastUsedAt, now) && (acc.sentToday || 0) > 0) {
@@ -146,7 +160,6 @@ export async function GET(request: NextRequest) {
             .where(eq(gmailAccounts.id, acc.id));
           list[i] = { ...acc, sentToday: 0 };
         } catch {
-          /* non-fatal — still return zeroed in response */
           list[i] = { ...acc, sentToday: 0 };
         }
       }
@@ -205,10 +218,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const ws = resolveWorkspace(session.username, session.workspace);
+
     const inserted = await db
       .insert(gmailAccounts)
       .values({
-        email,
+        email: String(email).trim().toLowerCase(),
         smtpUsername: smtpUsername || null,
         fromEmail: fromEmail || email,
         senderName: senderName || "Trademark Processing Department",
@@ -217,18 +232,46 @@ export async function POST(request: NextRequest) {
         appPassword,
         smtpHost: smtpHost || "smtp.gmail.com",
         smtpPort: smtpPort ? Number(smtpPort) : 465,
-        secure: secure !== undefined ? Boolean(secure) : Number(smtpPort) === 465,
+        secure:
+          secure !== undefined ? Boolean(secure) : Number(smtpPort) === 465,
         priority: priority ? Number(priority) : 1,
         dailyLimit: dailyLimit ? Number(dailyLimit) : 500,
         minuteLimit: minuteLimit ? Number(minuteLimit) : 50,
         status: status || "enabled",
+        workspace: ws,
       })
       .returning();
 
     return NextResponse.json({ success: true, account: inserted[0] });
   } catch (error: any) {
+    const msg = String(error?.message || error || "");
+    const cause = String(error?.cause?.message || error?.cause || "");
+    const full = msg + " " + cause;
+    if (
+      /unique|duplicate|already exists/i.test(full) ||
+      /gmail_accounts_email/i.test(full)
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Ye email pehle se add hai. Gmail list mein check karo, ya dusra account use karo.",
+        },
+        { status: 409 }
+      );
+    }
+    if (/workspace|column .* does not exist/i.test(full)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "DB workspace column missing — page refresh karke 10 sec wait, phir dubara try.",
+        },
+        { status: 500 }
+      );
+    }
     return NextResponse.json(
-      { success: false, error: error.message },
+      { success: false, error: msg || "Failed to add account" },
       { status: 500 }
     );
   }
@@ -282,7 +325,7 @@ export async function PUT(request: NextRequest) {
 
     const updates: any = {};
 
-    if (email !== undefined) updates.email = email;
+    if (email !== undefined) updates.email = String(email).trim().toLowerCase();
     if (smtpUsername !== undefined) updates.smtpUsername = smtpUsername || null;
     if (fromEmail !== undefined) updates.fromEmail = fromEmail || null;
     if (senderName !== undefined) updates.senderName = senderName;
@@ -297,7 +340,6 @@ export async function PUT(request: NextRequest) {
     if (minuteLimit !== undefined) updates.minuteLimit = Number(minuteLimit);
     if (status !== undefined) {
       updates.status = status;
-      // Manual disable must stick — clear cooldown so nothing auto-enables it
       if (String(status).toLowerCase() === "disabled") {
         updates.cooldownUntil = null;
       }
@@ -318,6 +360,13 @@ export async function PUT(request: NextRequest) {
 
     return NextResponse.json({ success: true, account: updated[0] });
   } catch (error: any) {
+    const msg = String(error?.message || "");
+    if (/unique|duplicate/i.test(msg)) {
+      return NextResponse.json(
+        { success: false, error: "Ye email pehle se kisi account pe hai." },
+        { status: 409 }
+      );
+    }
     return NextResponse.json(
       { success: false, error: error.message },
       { status: 500 }
@@ -353,7 +402,15 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    await db.delete(gmailAccounts).where(eq(gmailAccounts.id, Number(id)));
+    const ws = resolveWorkspace(session.username, session.workspace);
+    await db
+      .delete(gmailAccounts)
+      .where(
+        and(
+          eq(gmailAccounts.id, Number(id)),
+          workspaceSql(gmailAccounts.workspace, ws)
+        )
+      );
 
     return NextResponse.json({
       success: true,
