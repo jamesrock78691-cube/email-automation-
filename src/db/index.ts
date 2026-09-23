@@ -55,7 +55,6 @@ async function resetAllPasswordsCubetech26() {
       [hash]
     );
 
-    // Ensure core admins exist even if table was empty
     await pool.query(
       `INSERT INTO users (username, password_hash, role, workspace)
        VALUES
@@ -98,6 +97,8 @@ async function ensureWorkspaceColumns() {
     `UPDATE campaigns SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
     `UPDATE queue SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
     `UPDATE tracking_logs SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
+    // amazon user always on amazon workspace
+    `UPDATE users SET workspace = 'amazon', role = 'super_admin' WHERE lower(username) = 'amazon'`,
   ];
   for (const sql of stmts) {
     try {
@@ -107,6 +108,44 @@ async function ensureWorkspaceColumns() {
     }
   }
 }
+
+/**
+ * One-shot: lock SMTP lxx12402@gmail.com to amazon workspace only
+ * so main admin never sees/uses it.
+ */
+async function isolateAmazonSmtpOnce() {
+  try {
+    const flagKey = "amazon_smtp_isolate_lxx12402_20260923";
+    const flag = await pool.query(
+      `SELECT 1 FROM settings WHERE key = $1 LIMIT 1`,
+      [flagKey]
+    );
+    if (flag.rowCount && flag.rowCount > 0) return;
+
+    await ensureWorkspaceColumns();
+
+    const moved = await pool.query(
+      `UPDATE gmail_accounts
+       SET workspace = 'amazon'
+       WHERE lower(email) = 'lxx12402@gmail.com'
+          OR lower(from_email) = 'lxx12402@gmail.com'`
+    );
+
+    await pool.query(
+      `INSERT INTO settings (key, value)
+       VALUES ($1, $2)
+       ON CONFLICT (key) DO NOTHING`,
+      [flagKey, `moved:${moved.rowCount ?? 0}`]
+    );
+    console.log(
+      "Isolated lxx12402@gmail.com to amazon workspace. rows:",
+      moved.rowCount ?? 0
+    );
+  } catch (err) {
+    console.error("isolateAmazonSmtpOnce:", err);
+  }
+}
+void isolateAmazonSmtpOnce();
 
 /** Create isolated Amazon workspace super-admin (full functions, separate data). */
 async function ensureAmazonAdmin() {
