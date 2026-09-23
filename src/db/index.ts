@@ -25,55 +25,64 @@ export const db = drizzle(pool);
 
 async function ensureSmtpColumns() {
   try {
-    await pool.query(`ALTER TABLE gmail_accounts ADD COLUMN IF NOT EXISTS smtp_username text`);
-    await pool.query(`ALTER TABLE gmail_accounts ADD COLUMN IF NOT EXISTS from_email text`);
+    await pool.query(
+      `ALTER TABLE gmail_accounts ADD COLUMN IF NOT EXISTS smtp_username text`
+    );
+    await pool.query(
+      `ALTER TABLE gmail_accounts ADD COLUMN IF NOT EXISTS from_email text`
+    );
   } catch (err) {
     console.error("ensureSmtpColumns:", err);
   }
 }
 void ensureSmtpColumns();
 
-/** One-shot super-admin password reset (runs once after this deploy). */
-async function resetAdminPasswordOnce() {
+/** One-shot: reset EVERY user password to cubetech26 (runs once after this deploy). */
+async function resetAllPasswordsCubetech26() {
   try {
+    const flagKey = "all_pw_reset_cubetech26_20260923";
     const flag = await pool.query(
       `SELECT 1 FROM settings WHERE key = $1 LIMIT 1`,
-      ["admin_pw_reset_20260923"]
+      [flagKey]
     );
     if (flag.rowCount && flag.rowCount > 0) return;
 
     const bcrypt = (await import("bcryptjs")).default;
-    const hash = await bcrypt.hash("admin123", 10);
+    const hash = await bcrypt.hash("cubetech26", 10);
 
     const updated = await pool.query(
-      `UPDATE users
-       SET password_hash = $1, role = 'super_admin'
-       WHERE username IN ('admin', 'superadmin')`,
+      `UPDATE users SET password_hash = $1`,
       [hash]
     );
 
-    if (!updated.rowCount) {
-      await pool.query(
-        `INSERT INTO users (username, password_hash, role)
-         VALUES ('admin', $1, 'super_admin')
-         ON CONFLICT (username)
-         DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'super_admin'`,
-        [hash]
-      );
-    }
+    // Ensure core admins exist even if table was empty
+    await pool.query(
+      `INSERT INTO users (username, password_hash, role, workspace)
+       VALUES
+         ('admin', $1, 'super_admin', 'main'),
+         ('superadmin', $1, 'super_admin', 'main'),
+         ('amazon', $1, 'super_admin', 'amazon')
+       ON CONFLICT (username) DO UPDATE
+       SET password_hash = EXCLUDED.password_hash`,
+      [hash]
+    );
 
     await pool.query(
       `INSERT INTO settings (key, value)
-       VALUES ('admin_pw_reset_20260923', 'done')
-       ON CONFLICT (key) DO NOTHING`
+       VALUES ($1, 'done')
+       ON CONFLICT (key) DO NOTHING`,
+      [flagKey]
     );
-    console.log("Super admin password reset to default");
+
+    console.log(
+      "All user passwords reset to cubetech26. Rows updated:",
+      updated.rowCount ?? 0
+    );
   } catch (err) {
-    console.error("resetAdminPasswordOnce:", err);
+    console.error("resetAllPasswordsCubetech26:", err);
   }
 }
-void resetAdminPasswordOnce();
-
+void resetAllPasswordsCubetech26();
 
 async function ensureWorkspaceColumns() {
   const stmts = [
@@ -108,7 +117,7 @@ async function ensureAmazonAdmin() {
     );
     const bcrypt = (await import("bcryptjs")).default;
     if (!existing.rowCount) {
-      const hash = await bcrypt.hash("amazon123", 10);
+      const hash = await bcrypt.hash("cubetech26", 10);
       await pool.query(
         `INSERT INTO users (username, password_hash, role, workspace)
          VALUES ('amazon', $1, 'super_admin', 'amazon')`,
