@@ -1,4 +1,4 @@
-import { eq, or, isNull, and, SQL } from "drizzle-orm";
+import { eq, SQL } from "drizzle-orm";
 
 export const MAIN_WORKSPACE = "main";
 export const AMAZON_WORKSPACE = "amazon";
@@ -8,6 +8,8 @@ export function resolveWorkspace(
   stored?: string | null
 ): string {
   const s = String(stored || "").trim().toLowerCase();
+  if (s === AMAZON_WORKSPACE || s === "amazon") return AMAZON_WORKSPACE;
+  if (s === MAIN_WORKSPACE || s === "main") return MAIN_WORKSPACE;
   if (s) return s;
   const u = String(username || "").trim().toLowerCase();
   if (u === "amazon") return AMAZON_WORKSPACE;
@@ -20,11 +22,10 @@ export function settingKey(base: string, ws: string): string {
   return `${base}__${ws}`;
 }
 
+/** Strict filter — main and amazon never share rows. */
 export function workspaceSql(column: any, ws: string): SQL {
-  if (ws === MAIN_WORKSPACE) {
-    return or(eq(column, MAIN_WORKSPACE), isNull(column), eq(column, "")) as SQL;
-  }
-  return eq(column, ws) as SQL;
+  const w = resolveWorkspace(undefined, ws);
+  return eq(column, w) as SQL;
 }
 
 /** Read workspace from session token (Bearer or cookie). */
