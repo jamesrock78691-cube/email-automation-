@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Sandeer auto sheet + shared Manual Sent Log for all workspaces.
- * Auto: 1bXYe8aiJsL_6X45N_Bwe_OQG1TTUiVhXU4uhdcbbAsg / tab "sheet 1"
+ * Auto: 1bXYe8aiJsL_6X45N_Bwe_OQG1TTUiVhXU4uhdcbbAsg / tab "Sheet1"
  * Manual: 1OPKn3J8oJqTyZ-8OzY5-t-Qx-QV3ySuuCX94qEtnyjU
  */
 import fs from "node:fs";
@@ -23,7 +23,7 @@ if (!fs.existsSync(FILE)) {
 let t = fs.readFileSync(FILE, "utf8");
 
 const SANDEER_ID = "1bXYe8aiJsL_6X45N_Bwe_OQG1TTUiVhXU4uhdcbbAsg";
-const SANDEER_TAB = "sheet 1";
+const SANDEER_TAB = "Sheet1";
 const MANUAL_ID = "1OPKn3J8oJqTyZ-8OzY5-t-Qx-QV3ySuuCX94qEtnyjU";
 
 if (!t.includes("SANDEER_WORKSPACE")) {
@@ -33,17 +33,15 @@ if (!t.includes("SANDEER_WORKSPACE")) {
   );
 }
 
-// Force Sandeer sheet constants (replace empty or any previous value)
 if (t.includes("SANDEER_SHEET_ID")) {
   t = t.replace(
     /const SANDEER_SHEET_ID\s*=\s*[^;]+;/,
     `const SANDEER_SHEET_ID = process.env.GOOGLE_SHEET_ID_SANDEER || "${SANDEER_ID}";`
   );
   t = t.replace(
-    /const SANDEER_SHEET_NAME\s*=\s*[^;]+;|const SANDEER_SHEET_NAME\s*=\s*\n\s*process\.env\.GOOGLE_SHEET_NAME_SANDEER[^;]+;/,
+    /const SANDEER_SHEET_NAME\s*=\s*[^;]+;/,
     `const SANDEER_SHEET_NAME = process.env.GOOGLE_SHEET_NAME_SANDEER || "${SANDEER_TAB}";`
   );
-  // multi-line form
   t = t.replace(
     /const SANDEER_SHEET_NAME\s*=\s*\n\s*process\.env\.GOOGLE_SHEET_NAME_SANDEER \|\| "[^"]*";/,
     `const SANDEER_SHEET_NAME =
@@ -67,7 +65,6 @@ const MANUAL_SHEET_ID`
   );
 }
 
-// Shared Manual Sent Log for ALL workspaces
 t = t.replace(
   /const MANUAL_SHEET_ID\s*=\s*process\.env\.GOOGLE_MANUAL_LOG_SHEET_ID \|\| "[^"]*";/,
   `const MANUAL_SHEET_ID = process.env.GOOGLE_MANUAL_LOG_SHEET_ID || "${MANUAL_ID}";`
@@ -107,6 +104,6 @@ console.log(
   t.includes(SANDEER_ID),
   "manualId=",
   t.includes(MANUAL_ID),
-  "tab=",
+  "tab=Sheet1",
   t.includes(SANDEER_TAB)
 );
