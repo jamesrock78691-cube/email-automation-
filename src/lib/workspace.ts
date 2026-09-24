@@ -2,6 +2,13 @@ import { eq, SQL } from "drizzle-orm";
 
 export const MAIN_WORKSPACE = "main";
 export const AMAZON_WORKSPACE = "amazon";
+export const SANDEER_WORKSPACE = "sandeer";
+
+/** Known isolated tenant usernames → workspace id */
+const USERNAME_WORKSPACE: Record<string, string> = {
+  amazon: AMAZON_WORKSPACE,
+  sandeer: SANDEER_WORKSPACE,
+};
 
 export function resolveWorkspace(
   username?: string | null,
@@ -9,10 +16,11 @@ export function resolveWorkspace(
 ): string {
   const s = String(stored || "").trim().toLowerCase();
   if (s === AMAZON_WORKSPACE || s === "amazon") return AMAZON_WORKSPACE;
+  if (s === SANDEER_WORKSPACE || s === "sandeer") return SANDEER_WORKSPACE;
   if (s === MAIN_WORKSPACE || s === "main") return MAIN_WORKSPACE;
   if (s) return s;
   const u = String(username || "").trim().toLowerCase();
-  if (u === "amazon") return AMAZON_WORKSPACE;
+  if (USERNAME_WORKSPACE[u]) return USERNAME_WORKSPACE[u];
   return MAIN_WORKSPACE;
 }
 
@@ -22,7 +30,7 @@ export function settingKey(base: string, ws: string): string {
   return `${base}__${ws}`;
 }
 
-/** Strict filter — main and amazon never share rows. */
+/** Strict filter — tenants never share rows. */
 export function workspaceSql(column: any, ws: string): SQL {
   const w = resolveWorkspace(undefined, ws);
   return eq(column, w) as SQL;
