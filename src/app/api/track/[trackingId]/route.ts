@@ -6,7 +6,11 @@ import {
   recordOpenOnAutoSheet,
   recordOpenOnManualSheet,
 } from "@/app/services/googleSheets";
-import { MAIN_WORKSPACE, AMAZON_WORKSPACE } from "@/lib/workspace";
+import {
+  MAIN_WORKSPACE,
+  AMAZON_WORKSPACE,
+  SANDEER_WORKSPACE,
+} from "@/lib/workspace";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -16,10 +20,10 @@ const TRANSPARENT_PNG = Buffer.from(
   "base64"
 );
 
-/** Manual map keys: main unprefixed, amazon → manual_track_map__amazon */
 const MANUAL_MAP_KEYS = [
   "manual_track_map",
   "manual_track_map__amazon",
+  "manual_track_map__sandeer",
   "manual_track_map__main",
 ];
 
@@ -92,9 +96,11 @@ async function lookupManualMap(trackingId: string): Promise<{
       if (!entry || typeof entry !== "object") continue;
       const wsFromKey = key.includes("__amazon")
         ? AMAZON_WORKSPACE
-        : key.includes("__main")
-          ? MAIN_WORKSPACE
-          : MAIN_WORKSPACE;
+        : key.includes("__sandeer")
+          ? SANDEER_WORKSPACE
+          : key.includes("__main")
+            ? MAIN_WORKSPACE
+            : MAIN_WORKSPACE;
       return {
         ...entry,
         workspace: entry.workspace || wsFromKey,
@@ -106,7 +112,6 @@ async function lookupManualMap(trackingId: string): Promise<{
   }
 }
 
-/** One-time-ish: attach workspace on old tracking_logs rows that match queue */
 async function backfillTrackingWorkspace(trackingId: string, ws: string) {
   try {
     await db.execute(
@@ -116,7 +121,7 @@ async function backfillTrackingWorkspace(trackingId: string, ws: string) {
             AND ${ws} <> 'main'`
     );
   } catch (e) {
-    // ignore — column may already be correct
+    // ignore
   }
 }
 
@@ -191,7 +196,6 @@ export async function GET(
         console.error("trackingLogs insert (queue) failed:", e);
       }
 
-      // Fix any older opens for this trackingId that landed on wrong workspace
       await backfillTrackingWorkspace(trackingId, ws);
 
       recordOpenOnAutoSheet(trackingId, openedAtIso, ws).catch((err) =>
