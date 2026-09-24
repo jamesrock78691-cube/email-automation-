@@ -1,5 +1,9 @@
 #!/usr/bin/env node
-/** Ensure googleSheets.ts routes sandeer workspace to its own sheet. */
+/**
+ * Sandeer auto sheet + shared Manual Sent Log for all workspaces.
+ * Auto: 1bXYe8aiJsL_6X45N_Bwe_OQG1TTUiVhXU4uhdcbbAsg / tab "sheet 1"
+ * Manual: 1OPKn3J8oJqTyZ-8OzY5-t-Qx-QV3ySuuCX94qEtnyjU
+ */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +22,10 @@ if (!fs.existsSync(FILE)) {
 }
 let t = fs.readFileSync(FILE, "utf8");
 
+const SANDEER_ID = "1bXYe8aiJsL_6X45N_Bwe_OQG1TTUiVhXU4uhdcbbAsg";
+const SANDEER_TAB = "sheet 1";
+const MANUAL_ID = "1OPKn3J8oJqTyZ-8OzY5-t-Qx-QV3ySuuCX94qEtnyjU";
+
 if (!t.includes("SANDEER_WORKSPACE")) {
   t = t.replace(
     'import { MAIN_WORKSPACE, AMAZON_WORKSPACE, workspaceSql } from "@/lib/workspace";',
@@ -25,7 +33,23 @@ if (!t.includes("SANDEER_WORKSPACE")) {
   );
 }
 
-if (!t.includes("SANDEER_SHEET_ID")) {
+// Force Sandeer sheet constants (replace empty or any previous value)
+if (t.includes("SANDEER_SHEET_ID")) {
+  t = t.replace(
+    /const SANDEER_SHEET_ID\s*=\s*[^;]+;/,
+    `const SANDEER_SHEET_ID = process.env.GOOGLE_SHEET_ID_SANDEER || "${SANDEER_ID}";`
+  );
+  t = t.replace(
+    /const SANDEER_SHEET_NAME\s*=\s*[^;]+;|const SANDEER_SHEET_NAME\s*=\s*\n\s*process\.env\.GOOGLE_SHEET_NAME_SANDEER[^;]+;/,
+    `const SANDEER_SHEET_NAME = process.env.GOOGLE_SHEET_NAME_SANDEER || "${SANDEER_TAB}";`
+  );
+  // multi-line form
+  t = t.replace(
+    /const SANDEER_SHEET_NAME\s*=\s*\n\s*process\.env\.GOOGLE_SHEET_NAME_SANDEER \|\| "[^"]*";/,
+    `const SANDEER_SHEET_NAME =
+  process.env.GOOGLE_SHEET_NAME_SANDEER || "${SANDEER_TAB}";`
+  );
+} else {
   t = t.replace(
     `const AMAZON_SHEET_NAME =
   process.env.GOOGLE_SHEET_NAME_AMAZON || "Amazon";
@@ -34,13 +58,24 @@ const MANUAL_SHEET_ID`,
     `const AMAZON_SHEET_NAME =
   process.env.GOOGLE_SHEET_NAME_AMAZON || "Amazon";
 
-const SANDEER_SHEET_ID = process.env.GOOGLE_SHEET_ID_SANDEER || "";
+const SANDEER_SHEET_ID =
+  process.env.GOOGLE_SHEET_ID_SANDEER || "${SANDEER_ID}";
 const SANDEER_SHEET_NAME =
-  process.env.GOOGLE_SHEET_NAME_SANDEER || "Sandeer";
+  process.env.GOOGLE_SHEET_NAME_SANDEER || "${SANDEER_TAB}";
 
 const MANUAL_SHEET_ID`
   );
 }
+
+// Shared Manual Sent Log for ALL workspaces
+t = t.replace(
+  /const MANUAL_SHEET_ID\s*=\s*process\.env\.GOOGLE_MANUAL_LOG_SHEET_ID \|\| "[^"]*";/,
+  `const MANUAL_SHEET_ID = process.env.GOOGLE_MANUAL_LOG_SHEET_ID || "${MANUAL_ID}";`
+);
+t = t.replace(
+  /const MANUAL_SHEET_ID\s*=\s*process\.env\.GOOGLE_MANUAL_LOG_SHEET_ID \|\| "";/,
+  `const MANUAL_SHEET_ID = process.env.GOOGLE_MANUAL_LOG_SHEET_ID || "${MANUAL_ID}";`
+);
 
 if (!t.includes('w === SANDEER_WORKSPACE') && !t.includes('w === "sandeer"')) {
   t = t.replace(
@@ -58,19 +93,6 @@ if (!t.includes('w === SANDEER_WORKSPACE') && !t.includes('w === "sandeer"')) {
   );
 }
 
-if (!t.includes("GOOGLE_SHEET_ID_SANDEER missing")) {
-  t = t.replace(
-    `ws === AMAZON_WORKSPACE
-        ? "Amazon GOOGLE_SHEET_ID_AMAZON missing"
-        : "GOOGLE_SHEET_ID is missing in Vercel env"`,
-    `ws === AMAZON_WORKSPACE
-        ? "Amazon GOOGLE_SHEET_ID_AMAZON missing"
-        : ws === SANDEER_WORKSPACE || ws === "sandeer"
-          ? "Sandeer GOOGLE_SHEET_ID_SANDEER missing — set in Vercel env"
-          : "GOOGLE_SHEET_ID is missing in Vercel env"`
-  );
-}
-
 if (!t.includes("SANDEER_WORKSPACE]")) {
   t = t.replace(
     ": [MAIN_WORKSPACE, AMAZON_WORKSPACE];",
@@ -79,4 +101,12 @@ if (!t.includes("SANDEER_WORKSPACE]")) {
 }
 
 fs.writeFileSync(FILE, t);
-console.log("patch-sandeer-sheets done", t.includes("SANDEER_SHEET_ID"));
+console.log(
+  "patch-sandeer-sheets:",
+  "sandeerId=",
+  t.includes(SANDEER_ID),
+  "manualId=",
+  t.includes(MANUAL_ID),
+  "tab=",
+  t.includes(SANDEER_TAB)
+);
