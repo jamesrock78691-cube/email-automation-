@@ -52,6 +52,7 @@ async function ensureWorkspaceColumns() {
     `UPDATE queue SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
     `UPDATE tracking_logs SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
     `UPDATE users SET workspace = 'amazon', role = 'super_admin' WHERE lower(username) = 'amazon'`,
+    `UPDATE users SET workspace = 'sandeer', role = 'super_admin' WHERE lower(username) = 'sandeer'`,
   ];
   for (const sql of stmts) {
     try {
@@ -62,7 +63,6 @@ async function ensureWorkspaceColumns() {
   }
 }
 
-/** Copy workspace from queue → tracking_logs so Amazon opens appear on dashboard */
 async function backfillTrackingLogWorkspace() {
   try {
     const flagKey = "tracking_logs_workspace_backfill_v1";
@@ -70,7 +70,6 @@ async function backfillTrackingLogWorkspace() {
       `SELECT 1 FROM settings WHERE key = $1 LIMIT 1`,
       [flagKey]
     );
-    // Always run sync for mismatched rows (cheap); flag only logs once
     const res = await pool.query(`
       UPDATE tracking_logs tl
       SET workspace = q.workspace
@@ -119,9 +118,6 @@ async function ensureEmailWorkspaceUnique() {
 }
 void ensureEmailWorkspaceUnique();
 
-/**
- * Hard isolation: known Amazon SMTP emails always live in amazon workspace.
- */
 async function isolateAmazonSmtpV3() {
   try {
     const flagKey = "amazon_hard_isolate_v3_20260924";
@@ -164,28 +160,38 @@ async function isolateAmazonSmtpV3() {
 }
 void isolateAmazonSmtpV3();
 
-async function ensureAmazonAdmin() {
+async function ensureTenantAdmin(
+  username: string,
+  workspace: string,
+  password = "cubetech26"
+) {
   try {
     await ensureWorkspaceColumns();
     const existing = await pool.query(
-      `SELECT id FROM users WHERE username = 'amazon' LIMIT 1`
+      `SELECT id FROM users WHERE lower(username) = $1 LIMIT 1`,
+      [username.toLowerCase()]
     );
     const bcrypt = (await import("bcryptjs")).default;
     if (!existing.rowCount) {
-      const hash = await bcrypt.hash("cubetech26", 10);
+      const hash = await bcrypt.hash(password, 10);
       await pool.query(
         `INSERT INTO users (username, password_hash, role, workspace)
-         VALUES ('amazon', $1, 'super_admin', 'amazon')`,
-        [hash]
+         VALUES ($1, $2, 'super_admin', $3)`,
+        [username, hash, workspace]
       );
+      console.log(`ensureTenantAdmin: created ${username} @ ${workspace}`);
     } else {
       await pool.query(
-        `UPDATE users SET role = 'super_admin', workspace = 'amazon'
-         WHERE username = 'amazon'`
+        `UPDATE users SET role = 'super_admin', workspace = $2
+         WHERE lower(username) = $1`,
+        [username.toLowerCase(), workspace]
       );
+      console.log(`ensureTenantAdmin: updated ${username} → ${workspace}`);
     }
   } catch (err) {
-    console.error("ensureAmazonAdmin:", err);
+    console.error(`ensureTenantAdmin(${username}):`, err);
   }
 }
-void ensureAmazonAdmin();
+
+void ensureTenantAdmin("amazon", "amazon");
+void ensureTenantAdmin("sandeer", "sandeer");
