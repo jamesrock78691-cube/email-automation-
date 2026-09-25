@@ -62,7 +62,8 @@ export async function GET(req: NextRequest) {
           .where(eq(settings.key, settingKey("agent_stats", ws)))
           .limit(1);
         const statsMap = statsRows.length
-          ? JSON.parse(statsRows[0].value || "{}") : {};
+          ? JSON.parse(statsRows[0].value || "{}")
+          : {};
         const my = statsMap[String(session.userId)] || {};
         sentCount = Number(my.totalSent) || 0;
       } catch {
@@ -212,45 +213,57 @@ export async function GET(req: NextRequest) {
         console.error("dashboard open workspace sync:", e);
       }
 
-      const totalEvents = await db.execute(sql`
-        SELECT COUNT(*)::int AS value FROM (
-          SELECT tl.id FROM tracking_logs tl
-          WHERE tl.workspace = ${ws}
-          UNION
-          SELECT tl.id FROM tracking_logs tl
-          INNER JOIN queue q ON q.tracking_id = tl.tracking_id
-          WHERE q.workspace = ${ws}
-        ) x
-      `);
-      totalOpenEvents = Number(
-        (totalEvents as any)?.rows?.[0]?.value ??
-          (totalEvents as any)?.[0]?.value ??
-          0
-      );
+      try {
+        const sumRow = await db
+          .select({
+            value: sql<number>`coalesce(sum(${queue.openCount}), 0)`,
+          })
+          .from(queue)
+          .where(workspaceSql(queue.workspace, ws));
+        const sumOpens = Number(sumRow[0]?.value || 0);
 
-      const uniqueAll = await db.execute(sql`
-        SELECT COUNT(*)::int AS value FROM (
-          SELECT DISTINCT COALESCE(NULLIF(TRIM(tl.email), ''), tl.tracking_id) AS k
-          FROM tracking_logs tl
-          WHERE tl.workspace = ${ws}
-          UNION
-          SELECT DISTINCT COALESCE(NULLIF(TRIM(tl.email), ''), tl.tracking_id)
-          FROM tracking_logs tl
-          INNER JOIN queue q ON q.tracking_id = tl.tracking_id
-          WHERE q.workspace = ${ws}
-          UNION
-          SELECT DISTINCT COALESCE(NULLIF(TRIM(q.email), ''), q.tracking_id)
-          FROM queue q
-          WHERE q.workspace = ${ws}
-            AND COALESCE(q.open_count, 0) > 0
-        ) u
-      `);
-      uniqueOpens = Number(
-        (uniqueAll as any)?.rows?.[0]?.value ??
-          (uniqueAll as any)?.[0]?.value ??
-          0
-      );
-      openedCount = uniqueOpens;
+        const logCount = await db
+          .select({ value: count() })
+          .from(trackingLogs)
+          .where(workspaceSql(trackingLogs.workspace, ws));
+        const logsN = Number(logCount[0]?.value || 0);
+
+        totalOpenEvents = sumOpens > 0 ? sumOpens : logsN;
+      } catch (e) {
+        console.error("dashboard totalOpenEvents:", e);
+        totalOpenEvents = 0;
+      }
+
+      try {
+        const qOpened = await db
+          .select({ value: count() })
+          .from(queue)
+          .where(
+            and(
+              workspaceSql(queue.workspace, ws),
+              sql`coalesce(${queue.openCount}, 0) > 0`
+            )
+          );
+        const fromQueue = Number(qOpened[0]?.value || 0);
+
+        const logUniq = await db
+          .select({
+            value: sql<number>`count(distinct coalesce(nullif(trim(${trackingLogs.email}), ''), ${trackingLogs.trackingId}))`,
+          })
+          .from(trackingLogs)
+          .where(workspaceSql(trackingLogs.workspace, ws));
+        const fromLogs = Number(logUniq[0]?.value || 0);
+
+        uniqueOpens = Math.max(fromQueue, fromLogs);
+        openedCount = uniqueOpens;
+        console.log(
+          `[DASH] ws=${ws} uniqueOpens=${uniqueOpens} fromQueue=${fromQueue} fromLogs=${fromLogs} totalEvents=${totalOpenEvents}`
+        );
+      } catch (e) {
+        console.error("dashboard uniqueOpens:", e);
+        uniqueOpens = 0;
+        openedCount = 0;
+      }
     }
 
     const activeGmailResult = await db
