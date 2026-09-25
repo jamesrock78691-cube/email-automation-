@@ -114,11 +114,11 @@ async function lookupManualMap(trackingId: string): Promise<{
 
 async function backfillTrackingWorkspace(trackingId: string, ws: string) {
   try {
+    // Always align all opens for this trackingId to the queue item workspace
     await db.execute(
       sql`UPDATE tracking_logs SET workspace = ${ws}
           WHERE tracking_id = ${trackingId}
-            AND (workspace IS NULL OR workspace = '' OR workspace = 'main')
-            AND ${ws} <> 'main'`
+            AND workspace IS DISTINCT FROM ${ws}`
     );
   } catch (e) {
     // ignore
