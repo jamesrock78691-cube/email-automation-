@@ -3,8 +3,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "prebuild": "node scripts/restore-emailSender.mjs && node scripts/patch-sheet-vars.mjs && node scripts/patch-sandeer-sheets.mjs && node scripts/rebuild-page.mjs",
-    "build": "node scripts/restore-emailSender.mjs && node scripts/patch-sheet-vars.mjs && node scripts/patch-sandeer-sheets.mjs && node scripts/rebuild-page.mjs && next build",
+    "prebuild": "node scripts/restore-googleSheets.mjs && node scripts/restore-emailSender.mjs && node scripts/patch-sheet-vars.mjs && node scripts/patch-sandeer-sheets.mjs && node scripts/rebuild-page.mjs",
+    "build": "node scripts/restore-googleSheets.mjs && node scripts/restore-emailSender.mjs && node scripts/patch-sheet-vars.mjs && node scripts/patch-sandeer-sheets.mjs && node scripts/rebuild-page.mjs && next build",
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
