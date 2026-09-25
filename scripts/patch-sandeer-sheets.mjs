@@ -69,19 +69,6 @@ t = t.replace(
     '";'
 );
 
-// Also allow common tab name aliases via env default list in getManualSheet
-if (!t.includes("MANUAL_TAB_CANDIDATES")) {
-  t = t.replace(
-    'const MANUAL_SHEET_NAME =\n  process.env.GOOGLE_MANUAL_LOG_SHEET_NAME || "Manual Sent Log";',
-    'const MANUAL_SHEET_NAME =\n  process.env.GOOGLE_MANUAL_LOG_SHEET_NAME || "Manual Sent Log";\nconst MANUAL_TAB_CANDIDATES = [\n  MANUAL_SHEET_NAME,\n  "Manual Sent Log",\n  "Manual_Sent_Log",\n  "Manual Sent",\n  "manual sent log",\n  "Sheet1",\n];'
-  );
-  // single-line form
-  t = t.replace(
-    'const MANUAL_SHEET_NAME =\n  process.env.GOOGLE_MANUAL_LOG_SHEET_NAME || "Manual Sent Log";',
-    'const MANUAL_SHEET_NAME = process.env.GOOGLE_MANUAL_LOG_SHEET_NAME || "Manual Sent Log";\nconst MANUAL_TAB_CANDIDATES = [MANUAL_SHEET_NAME, "Manual Sent Log", "Manual_Sent_Log", "Manual Sent", "Sheet1"];'
-  );
-}
-
 if (!t.includes("w === SANDEER_WORKSPACE")) {
   t = t.replace(
     '  if (w === AMAZON_WORKSPACE || w === "amazon") {\n    return { id: AMAZON_SHEET_ID, name: AMAZON_SHEET_NAME };\n  }\n  return { id: SHEET_ID, name: SHEET_NAME };',
@@ -89,46 +76,104 @@ if (!t.includes("w === SANDEER_WORKSPACE")) {
   );
 }
 
-// getManualSheet — try multiple tab names
-const OLD_GET_MANUAL = `async function getManualSheet() {
-  if (!MANUAL_SHEET_ID) {
-    throw new Error("GOOGLE_MANUAL_LOG_SHEET_ID is missing in Vercel env");
-  }
-  const jwt = ensureAuth();
-  if (!manualDoc) {
-    manualDoc = new GoogleSpreadsheet(MANUAL_SHEET_ID, jwt);
-  }
-  if (!manualInitialized) {
-    await manualDoc.loadInfo();
-    manualInitialized = true;
-  }
-  const sheet = manualDoc.sheetsByTitle[MANUAL_SHEET_NAME];
-  if (!sheet) {
-    throw new Error(\`Sheet tab "\${MANUAL_SHEET_NAME}" not found.\`);
-  }
-  return sheet;
-}`;
+const NEW_GET =
+  "async function getManualSheet() {\n" +
+  "  if (!MANUAL_SHEET_ID) {\n" +
+  '    throw new Error("GOOGLE_MANUAL_LOG_SHEET_ID is missing in Vercel env");\n' +
+  "  }\n" +
+  "  const jwt = ensureAuth();\n" +
+  "  if (!manualDoc) {\n" +
+  "    manualDoc = new GoogleSpreadsheet(MANUAL_SHEET_ID, jwt);\n" +
+  "  }\n" +
+  "  await manualDoc.loadInfo();\n" +
+  "  manualInitialized = true;\n" +
+  "  const titles = Object.keys(manualDoc.sheetsByTitle || {});\n" +
+  "  const candidates = [\n" +
+  "    MANUAL_SHEET_NAME,\n" +
+  '    "Manual Sent Log",\n' +
+  '    "Manual_Sent_Log",\n' +
+  '    "Manual Sent",\n' +
+  '    "Sheet1",\n' +
+  "  ];\n" +
+  "  for (const name of candidates) {\n" +
+  "    if (!name) continue;\n" +
+  "    const sheet = manualDoc.sheetsByTitle[name];\n" +
+  "    if (sheet) {\n" +
+  '      console.log("[MANUAL SHEET] using tab=" + name + " available=" + titles.join(","));\n' +
+  "      return sheet;\n" +
+  "    }\n" +
+  "  }\n" +
+  "  for (const title of titles) {\n" +
+  "    if (candidates.some((c) => c && c.toLowerCase() === title.toLowerCase())) {\n" +
+  "      return manualDoc.sheetsByTitle[title];\n" +
+  "    }\n" +
+  "  }\n" +
+  "  throw new Error(\n" +
+  '    "Manual sheet tab not found. Tried: " +\n' +
+  '      candidates.join(", ") +\n' +
+  '      ". Available: " +\n' +
+  '      (titles.join(", ") || "(none)")\n' +
+  "  );\n" +
+  "}\n";
 
-const NEW_GET_MANUAL = `async function getManualSheet() {
-  if (!MANUAL_SHEET_ID) {
-    throw new Error("GOOGLE_MANUAL_LOG_SHEET_ID is missing in Vercel env");
-  }
-  const jwt = ensureAuth();
-  if (!manualDoc) {
-    manualDoc = new GoogleSpreadsheet(MANUAL_SHEET_ID, jwt);
-  }
-  await manualDoc.loadInfo();
-  manualInitialized = true;
-  const titles = Object.keys(manualDoc.sheetsByTitle || {});
-  const candidates = [
-    MANUAL_SHEET_NAME,
-    "Manual Sent Log",
-    "Manual_Sent_Log",
-    "Manual Sent",
-    "Sheet1",
-  ];
-  for (const name of candidates) {
-    if (!name) continue;
-    const sheet = manualDoc.sheetsByTitle[name];
-    if (sheet) {
-      console.log(\`[MANUAL SHEET] using tab="\${name}\
+if (t.includes("async function getManualSheet()")) {
+  t = t.replace(
+    /async function getManualSheet\(\) \{[\s\S]*?\n\}\n\n/,
+    NEW_GET + "\n"
+  );
+  console.log("getManualSheet replaced");
+}
+
+t = t.replace(
+  /const tryWs = preferredWs\s*\?\s*\[preferredWs\]\s*:\s*\[[^\]]+\];/,
+  "const tryWs = preferredWs\n    ? [String(preferredWs).toLowerCase(), MAIN_WORKSPACE, AMAZON_WORKSPACE, SANDEER_WORKSPACE].filter((w, i, a) => w && a.indexOf(w) === i)\n    : [MAIN_WORKSPACE, AMAZON_WORKSPACE, SANDEER_WORKSPACE];"
+);
+
+while (t.includes("if (tid !== id) continue;")) {
+  t = t.replace(
+    "if (tid !== id) continue;",
+    "if (!tid || tid.toLowerCase() !== id.toLowerCase()) continue;"
+  );
+}
+
+t = t.replaceAll(
+  'pick("Tracking ID", "tracking_id", "Tracking Id")',
+  'pick("Tracking ID", "tracking_id", "Tracking Id", "tracking id", "TrackingID")'
+);
+
+if (!t.includes("[OPEN MANUAL]")) {
+  t = t.replace(
+    "const sheet = await getManualSheet();\n    const rows = await sheet.getRows();\n    const id = String(trackingId).trim();",
+    'const sheet = await getManualSheet();\n    const rows = await sheet.getRows();\n    const id = String(trackingId).trim();\n    console.log("[OPEN MANUAL] rows=" + rows.length + " looking for " + id);'
+  );
+}
+
+const OLD_INNER =
+  "      if (!cfg.id || !trackingId) continue;\n" +
+  "      const sheet = await getAutoSheet(ws);\n" +
+  "      const rows = await sheet.getRows();\n" +
+  "      const id = String(trackingId).trim();\n" +
+  "      const openedAt = openedAtIso || new Date().toISOString();";
+
+const NEW_INNER =
+  "      if (!cfg.id || !trackingId) continue;\n" +
+  "      const id = String(trackingId).trim();\n" +
+  "      const openedAt = openedAtIso || new Date().toISOString();\n" +
+  "      const sheet = await getAutoSheet(ws, { refresh: true });\n" +
+  "      const rows = await sheet.getRows();\n" +
+  '      console.log("[OPEN SHEET] ws=" + ws + " rows=" + rows.length + " looking for " + id);';
+
+if (t.includes(OLD_INNER)) {
+  t = t.replace(OLD_INNER, NEW_INNER);
+  console.log("auto open inner replaced");
+}
+
+fs.writeFileSync(FILE, t);
+console.log(
+  "done",
+  t.includes(SANDEER_ID),
+  t.includes(MANUAL_ID),
+  t.includes("toLowerCase() !== id.toLowerCase()"),
+  t.includes("[OPEN MANUAL]"),
+  t.includes("[MANUAL SHEET]")
+);
