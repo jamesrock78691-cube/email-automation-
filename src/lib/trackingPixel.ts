@@ -1,18 +1,17 @@
 /** Open-tracking pixel — Gmail / Outlook / Apple Mail friendly. */
 
-const PRODUCTION_FALLBACK = "https://email-automation-ten-mu.vercel.app";
-
 export function getAppBaseUrl(request?: { headers?: Headers }): string {
   const envUrl =
     process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || "";
   if (envUrl.trim()) return envUrl.trim().replace(/\/$/, "");
 
-  const prod =
+  const vercel =
     process.env.VERCEL_PROJECT_PRODUCTION_URL ||
     process.env.NEXT_PUBLIC_VERCEL_PROJECT_PRODUCTION_URL ||
+    process.env.VERCEL_URL ||
     "";
-  if (prod.trim()) {
-    const host = prod.replace(/^https?:\/\//, "").replace(/\/$/, "");
+  if (vercel.trim()) {
+    const host = vercel.replace(/^https?:\/\//, "").replace(/\/$/, "");
     if (host && !host.includes("localhost")) return `https://${host}`;
   }
 
@@ -22,26 +21,18 @@ export function getAppBaseUrl(request?: { headers?: Headers }): string {
     "";
   const proto = request?.headers?.get("x-forwarded-proto") || "https";
   if (host && !/localhost|127\.0\.0\.1/i.test(host)) {
-    if (!/^[a-z0-9-]+-[a-z0-9]{8,}-[a-z0-9-]+\.vercel\.app$/i.test(host)) {
-      return `${proto}://${host}`.replace(/\/$/, "");
-    }
+    return `${proto}://${host}`.replace(/\/$/, "");
   }
 
-  return PRODUCTION_FALLBACK;
+  return "https://email-automation-ten-mu.vercel.app";
 }
 
-function resolvePixelOrigin(_baseUrl?: string): string {
-  const envUrl = (
-    process.env.NEXT_PUBLIC_APP_URL ||
-    process.env.APP_URL ||
-    ""
-  )
-    .trim()
-    .replace(/\/$/, "");
-  if (envUrl && !/localhost|127\.0\.0\.1/i.test(envUrl)) {
-    return /^https?:\/\//i.test(envUrl) ? envUrl : `https://${envUrl}`;
+function resolvePixelOrigin(baseUrl?: string): string {
+  const fromBase = String(baseUrl || "").trim().replace(/\/$/, "");
+  if (fromBase && !/localhost|127\.0\.0\.1/i.test(fromBase)) {
+    return /^https?:\/\//i.test(fromBase) ? fromBase : `https://${fromBase}`;
   }
-  return PRODUCTION_FALLBACK;
+  return getAppBaseUrl();
 }
 
 /**
