@@ -8,7 +8,7 @@ import {
   trackingLogs,
   settings,
 } from "@/db/schema";
-import { count, eq, desc, sql, inArray, and } from "drizzle-orm";
+import { count, eq, desc, sql, inArray, and, or } from "drizzle-orm";
 import { workspaceSql, settingKey } from "@/lib/workspace";
 import {
   getSessionFromRequest,
@@ -62,8 +62,7 @@ export async function GET(req: NextRequest) {
           .where(eq(settings.key, settingKey("agent_stats", ws)))
           .limit(1);
         const statsMap = statsRows.length
-          ? JSON.parse(statsRows[0].value || "{}")
-          : {};
+          ? JSON.parse(statsRows[0].value || "{}") : {};
         const my = statsMap[String(session.userId)] || {};
         sentCount = Number(my.totalSent) || 0;
       } catch {
@@ -101,12 +100,7 @@ export async function GET(req: NextRequest) {
           const openEvents = await db
             .select({ value: count() })
             .from(trackingLogs)
-            .where(
-              and(
-                inArray(trackingLogs.trackingId, myTrackIds),
-                workspaceSql(trackingLogs.workspace, ws)
-              )
-            );
+            .where(inArray(trackingLogs.trackingId, myTrackIds));
           totalOpenEvents = openEvents[0]?.value || 0;
 
           const uniq = await db
@@ -114,12 +108,7 @@ export async function GET(req: NextRequest) {
               value: sql<number>`count(distinct coalesce(${trackingLogs.email}, ${trackingLogs.trackingId}))`,
             })
             .from(trackingLogs)
-            .where(
-              and(
-                inArray(trackingLogs.trackingId, myTrackIds),
-                workspaceSql(trackingLogs.workspace, ws)
-              )
-            );
+            .where(inArray(trackingLogs.trackingId, myTrackIds));
           uniqueOpens = Number(uniq[0]?.value || 0);
           openedCount = uniqueOpens;
         }
@@ -210,19 +199,57 @@ export async function GET(req: NextRequest) {
         );
       failedCount = failedEmailsResult[0]?.value || 0;
 
-      const totalEvents = await db
-        .select({ value: count() })
-        .from(trackingLogs)
-        .where(workspaceSql(trackingLogs.workspace, ws));
-      totalOpenEvents = totalEvents[0]?.value || 0;
+      try {
+        await db.execute(sql`
+          UPDATE tracking_logs tl
+          SET workspace = q.workspace
+          FROM queue q
+          WHERE tl.tracking_id = q.tracking_id
+            AND q.workspace = ${ws}
+            AND tl.workspace IS DISTINCT FROM q.workspace
+        `);
+      } catch (e) {
+        console.error("dashboard open workspace sync:", e);
+      }
 
-      const uniqueAll = await db
-        .select({
-          value: sql<number>`count(distinct coalesce(${trackingLogs.email}, ${trackingLogs.trackingId}))`,
-        })
-        .from(trackingLogs)
-        .where(workspaceSql(trackingLogs.workspace, ws));
-      uniqueOpens = Number(uniqueAll[0]?.value || 0);
+      const totalEvents = await db.execute(sql`
+        SELECT COUNT(*)::int AS value FROM (
+          SELECT tl.id FROM tracking_logs tl
+          WHERE tl.workspace = ${ws}
+          UNION
+          SELECT tl.id FROM tracking_logs tl
+          INNER JOIN queue q ON q.tracking_id = tl.tracking_id
+          WHERE q.workspace = ${ws}
+        ) x
+      `);
+      totalOpenEvents = Number(
+        (totalEvents as any)?.rows?.[0]?.value ??
+          (totalEvents as any)?.[0]?.value ??
+          0
+      );
+
+      const uniqueAll = await db.execute(sql`
+        SELECT COUNT(*)::int AS value FROM (
+          SELECT DISTINCT COALESCE(NULLIF(TRIM(tl.email), ''), tl.tracking_id) AS k
+          FROM tracking_logs tl
+          WHERE tl.workspace = ${ws}
+          UNION
+          SELECT DISTINCT COALESCE(NULLIF(TRIM(tl.email), ''), tl.tracking_id)
+          FROM tracking_logs tl
+          INNER JOIN queue q ON q.tracking_id = tl.tracking_id
+          WHERE q.workspace = ${ws}
+          UNION
+          SELECT DISTINCT COALESCE(NULLIF(TRIM(q.email), ''), q.tracking_id)
+          FROM queue q
+          WHERE q.workspace = ${ws}
+            AND COALESCE(q.open_count, 0) > 0
+        ) u
+      `);
+      uniqueOpens = Number(
+        (uniqueAll as any)?.rows?.[0]?.value ??
+          (uniqueAll as any)?.[0]?.value ??
+          0
+      );
       openedCount = uniqueOpens;
     }
 
@@ -322,10 +349,21 @@ export async function GET(req: NextRequest) {
         queueEmail: queue.email,
       })
       .from(trackingLogs)
-      .leftJoin(queue, eq(trackingLogs.queueId, queue.id))
-      .where(workspaceSql(trackingLogs.workspace, ws))
+      .leftJoin(
+        queue,
+        or(
+          eq(trackingLogs.queueId, queue.id),
+          eq(trackingLogs.trackingId, queue.trackingId)
+        )
+      )
+      .where(
+        or(
+          workspaceSql(trackingLogs.workspace, ws),
+          workspaceSql(queue.workspace, ws)
+        )
+      )
       .orderBy(desc(trackingLogs.openedAt))
-      .limit(20);
+      .limit(40);
 
     let recentOpens = recentOpensRaw.map((op) => {
       const isManual = op.queueId == null;
