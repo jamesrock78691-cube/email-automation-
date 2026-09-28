@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db, ensureSchemaReady } from "@/db";
+import { db, pool, ensureSchemaReady, forceQueueWorkspaceColumn } from "@/db";
 import { queue, templates, campaigns } from "@/db/schema";
 import { eq, desc, and } from "drizzle-orm";
 import { randomUUID } from "crypto";
@@ -23,16 +23,20 @@ function unauthorized() {
 
 export async function GET(request: NextRequest) {
   try {
-    await ensureSchemaReady();
+    try {
+      await ensureSchemaReady();
+    } catch (e: any) {
+      console.error("ensureSchemaReady:", e?.message || e);
+    }
+    await forceQueueWorkspaceColumn();
     const session = requireSessionWorkspace(request);
     if (!session) return unauthorized();
     const ws = session.workspace;
-    const list = await db
-      .select()
-      .from(queue)
-      .where(workspaceSql(queue.workspace, ws))
-      .orderBy(desc(queue.createdAt));
-    return NextResponse.json({ success: true, list, workspace: ws });
+    const r = await pool.query(
+      `SELECT * FROM queue WHERE workspace = $1 ORDER BY created_at DESC NULLS LAST, id DESC`,
+      [ws]
+    );
+    return NextResponse.json({ success: true, list: r.rows, workspace: ws });
   } catch (error: any) {
     return NextResponse.json(
       { success: false, error: error.message },
@@ -43,7 +47,12 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    await ensureSchemaReady();
+    try {
+      await ensureSchemaReady();
+    } catch (e: any) {
+      console.error("ensureSchemaReady:", e?.message || e);
+    }
+    await forceQueueWorkspaceColumn();
     const session = requireSessionWorkspace(request);
     if (!session) return unauthorized();
     const ws = session.workspace;
