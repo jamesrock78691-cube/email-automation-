@@ -24,6 +24,112 @@ if (process.env.NODE_ENV !== "production") {
 
 export const db = drizzle(pool);
 
+/** Create core tables if they do not exist (fresh / wiped DB). */
+async function ensureCoreTables() {
+  const creates = [
+    `CREATE TABLE IF NOT EXISTS users (
+      id serial PRIMARY KEY,
+      username text NOT NULL UNIQUE,
+      password_hash text NOT NULL,
+      role text DEFAULT 'admin' NOT NULL,
+      workspace text DEFAULT 'main' NOT NULL,
+      created_at timestamp DEFAULT now() NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS settings (
+      id serial PRIMARY KEY,
+      key text NOT NULL UNIQUE,
+      value text NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS gmail_accounts (
+      id serial PRIMARY KEY,
+      email text NOT NULL,
+      smtp_username text,
+      from_email text,
+      sender_name text DEFAULT 'Trademark Processing Department' NOT NULL,
+      reply_to_email text,
+      provider text DEFAULT 'gmail' NOT NULL,
+      app_password text NOT NULL,
+      smtp_host text DEFAULT 'smtp.gmail.com' NOT NULL,
+      smtp_port integer DEFAULT 465 NOT NULL,
+      secure boolean DEFAULT true NOT NULL,
+      priority integer DEFAULT 1 NOT NULL,
+      daily_limit integer DEFAULT 500 NOT NULL,
+      minute_limit integer DEFAULT 50 NOT NULL,
+      sent_today integer DEFAULT 0 NOT NULL,
+      sent_this_minute integer DEFAULT 0 NOT NULL,
+      status text DEFAULT 'enabled' NOT NULL,
+      last_used_at timestamp,
+      cooldown_until timestamp,
+      error_count integer DEFAULT 0 NOT NULL,
+      workspace text DEFAULT 'main' NOT NULL,
+      created_at timestamp DEFAULT now() NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS templates (
+      id serial PRIMARY KEY,
+      name text NOT NULL,
+      subject text NOT NULL,
+      body_html text NOT NULL,
+      attachment_path text,
+      workspace text DEFAULT 'main' NOT NULL,
+      created_at timestamp DEFAULT now() NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS campaigns (
+      id serial PRIMARY KEY,
+      name text NOT NULL,
+      template_id integer,
+      status text DEFAULT 'draft' NOT NULL,
+      workspace text DEFAULT 'main' NOT NULL,
+      created_at timestamp DEFAULT now() NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS queue (
+      id serial PRIMARY KEY,
+      campaign_id integer,
+      reference_no text,
+      serial_no text,
+      mark_name text,
+      filing_date text,
+      email text NOT NULL,
+      cc text,
+      bcc text,
+      subject text,
+      template_id integer,
+      status text DEFAULT 'pending' NOT NULL,
+      tracking_id text NOT NULL UNIQUE,
+      tries integer DEFAULT 0 NOT NULL,
+      max_tries integer DEFAULT 3 NOT NULL,
+      error_message text,
+      gmail_used_id integer,
+      gmail_used_email text,
+      sent_at timestamp,
+      open_count integer DEFAULT 0 NOT NULL,
+      last_opened_at timestamp,
+      workspace text DEFAULT 'main' NOT NULL,
+      created_at timestamp DEFAULT now() NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS tracking_logs (
+      id serial PRIMARY KEY,
+      queue_id integer,
+      tracking_id text NOT NULL,
+      ip_address text,
+      user_agent text,
+      browser text,
+      device text,
+      opened_at timestamp DEFAULT now() NOT NULL,
+      email text,
+      mark_name text,
+      reference_no text,
+      workspace text DEFAULT 'main' NOT NULL
+    )`,
+  ];
+  for (const sql of creates) {
+    try {
+      await pool.query(sql);
+    } catch (err: any) {
+      console.error("ensureCoreTables:", err?.message || err);
+    }
+  }
+}
+
 async function ensureSmtpColumns() {
   try {
     await pool.query(
@@ -37,10 +143,6 @@ async function ensureSmtpColumns() {
   }
 }
 
-/**
- * Add workspace columns to all tenant tables.
- * Safe to run many times (IF NOT EXISTS).
- */
 export async function ensureWorkspaceColumns() {
   const stmts = [
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
@@ -49,14 +151,17 @@ export async function ensureWorkspaceColumns() {
     `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
     `ALTER TABLE queue ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
     `ALTER TABLE tracking_logs ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
-    // Fill any null/empty
+    `ALTER TABLE tracking_logs ADD COLUMN IF NOT EXISTS email text`,
+    `ALTER TABLE tracking_logs ADD COLUMN IF NOT EXISTS mark_name text`,
+    `ALTER TABLE tracking_logs ADD COLUMN IF NOT EXISTS reference_no text`,
+    `ALTER TABLE queue ADD COLUMN IF NOT EXISTS open_count integer DEFAULT 0`,
+    `ALTER TABLE queue ADD COLUMN IF NOT EXISTS last_opened_at timestamp`,
     `UPDATE users SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
     `UPDATE gmail_accounts SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
     `UPDATE templates SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
     `UPDATE campaigns SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
     `UPDATE queue SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
     `UPDATE tracking_logs SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
-    // Tenant admins
     `UPDATE users SET workspace = 'amazon', role = 'super_admin' WHERE lower(username) = 'amazon'`,
     `UPDATE users SET workspace = 'sandeer', role = 'super_admin' WHERE lower(username) = 'sandeer'`,
   ];
@@ -64,25 +169,35 @@ export async function ensureWorkspaceColumns() {
     try {
       await pool.query(sql);
     } catch (err: any) {
-      console.error("ensureWorkspaceColumns failed:", sql.slice(0, 80), err?.message || err);
+      console.error(
+        "ensureWorkspaceColumns failed:",
+        sql.slice(0, 90),
+        err?.message || err
+      );
     }
   }
 
-  // Verify queue.workspace exists; if not, try once more without DEFAULT (older PG)
-  try {
-    const check = await pool.query(`
-      SELECT 1
-      FROM information_schema.columns
-      WHERE table_name = 'queue' AND column_name = 'workspace'
-      LIMIT 1
-    `);
-    if (!check.rowCount) {
-      console.warn("queue.workspace still missing — retrying ALTER without DEFAULT");
-      await pool.query(`ALTER TABLE queue ADD COLUMN workspace text`);
-      await pool.query(`UPDATE queue SET workspace = 'main' WHERE workspace IS NULL`);
+  // Verify critical columns
+  for (const [table, col] of [
+    ["users", "workspace"],
+    ["queue", "workspace"],
+  ] as const) {
+    try {
+      const check = await pool.query(
+        `SELECT 1 FROM information_schema.columns
+         WHERE table_name = $1 AND column_name = $2 LIMIT 1`,
+        [table, col]
+      );
+      if (!check.rowCount) {
+        console.warn(`${table}.${col} still missing — retrying ALTER`);
+        await pool.query(`ALTER TABLE ${table} ADD COLUMN ${col} text`);
+        await pool.query(
+          `UPDATE ${table} SET ${col} = 'main' WHERE ${col} IS NULL`
+        );
+      }
+    } catch (err: any) {
+      console.error(`${table}.${col} verify:`, err?.message || err);
     }
-  } catch (err: any) {
-    console.error("queue.workspace verify/retry:", err?.message || err);
   }
 }
 
@@ -148,10 +263,8 @@ async function isolateAmazonSmtpV3() {
     if (flag.rowCount && flag.rowCount > 0) return;
 
     await ensureWorkspaceColumns();
-    await ensureEmailWorkspaceUnique();
 
     const amazonEmails = ["lxx12402@gmail.com"];
-
     for (const em of amazonEmails) {
       const moved = await pool.query(
         `UPDATE gmail_accounts
@@ -191,8 +304,8 @@ async function ensureTenantAdmin(
       [username.toLowerCase()]
     );
     const bcrypt = (await import("bcryptjs")).default;
+    const hash = await bcrypt.hash(password, 10);
     if (!existing.rowCount) {
-      const hash = await bcrypt.hash(password, 10);
       await pool.query(
         `INSERT INTO users (username, password_hash, role, workspace)
          VALUES ($1, $2, 'super_admin', $3)`,
@@ -200,6 +313,7 @@ async function ensureTenantAdmin(
       );
       console.log(`ensureTenantAdmin: created ${username} @ ${workspace}`);
     } else {
+      // Keep password if already set; only fix role/workspace
       await pool.query(
         `UPDATE users SET role = 'super_admin', workspace = $2
          WHERE lower(username) = $1`,
@@ -212,19 +326,46 @@ async function ensureTenantAdmin(
   }
 }
 
-/** Await this before any workspace-filtered query (dashboard, queue, etc.). */
+/** Ensure default admin exists (main workspace). */
+async function ensureDefaultAdmin() {
+  try {
+    const existing = await pool.query(
+      `SELECT id FROM users WHERE lower(username) = 'admin' LIMIT 1`
+    );
+    const bcrypt = (await import("bcryptjs")).default;
+    if (!existing.rowCount) {
+      const hash = await bcrypt.hash("cubetech26", 10);
+      await pool.query(
+        `INSERT INTO users (username, password_hash, role, workspace)
+         VALUES ('admin', $1, 'super_admin', 'main')`,
+        [hash]
+      );
+      console.log("ensureDefaultAdmin: created admin / cubetech26");
+    } else {
+      await pool.query(
+        `UPDATE users SET role = 'super_admin', workspace = 'main'
+         WHERE lower(username) = 'admin'`
+      );
+    }
+  } catch (err) {
+    console.error("ensureDefaultAdmin:", err);
+  }
+}
+
+/** Await this before any DB query that needs schema (login, dashboard, queue). */
 export async function ensureSchemaReady(): Promise<void> {
   if (!globalForDb.__schemaReadyPromise) {
     globalForDb.__schemaReadyPromise = (async () => {
+      await ensureCoreTables();
       await ensureSmtpColumns();
       await ensureWorkspaceColumns();
       await ensureEmailWorkspaceUnique();
       await isolateAmazonSmtpV3();
+      await ensureDefaultAdmin();
       await ensureTenantAdmin("amazon", "amazon");
       await ensureTenantAdmin("sandeer", "sandeer");
       console.log("[DB] schemaReady complete");
     })().catch((err) => {
-      // Allow retry on next call
       globalForDb.__schemaReadyPromise = undefined;
       console.error("[DB] schemaReady failed:", err);
       throw err;
@@ -233,5 +374,4 @@ export async function ensureSchemaReady(): Promise<void> {
   return globalForDb.__schemaReadyPromise;
 }
 
-// Kick off on cold start (non-blocking)
 void ensureSchemaReady();
