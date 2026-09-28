@@ -9,6 +9,7 @@ if (!databaseUrl) {
 
 const globalForDb = globalThis as typeof globalThis & {
   __arenaNextJsPostgresqlPool?: Pool;
+  __schemaReadyPromise?: Promise<void>;
 };
 
 export const pool =
@@ -35,9 +36,12 @@ async function ensureSmtpColumns() {
     console.error("ensureSmtpColumns:", err);
   }
 }
-void ensureSmtpColumns();
 
-async function ensureWorkspaceColumns() {
+/**
+ * Add workspace columns to all tenant tables.
+ * Safe to run many times (IF NOT EXISTS).
+ */
+export async function ensureWorkspaceColumns() {
   const stmts = [
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
     `ALTER TABLE gmail_accounts ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
@@ -45,21 +49,40 @@ async function ensureWorkspaceColumns() {
     `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
     `ALTER TABLE queue ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
     `ALTER TABLE tracking_logs ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
+    // Fill any null/empty
     `UPDATE users SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
     `UPDATE gmail_accounts SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
     `UPDATE templates SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
     `UPDATE campaigns SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
     `UPDATE queue SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
     `UPDATE tracking_logs SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
+    // Tenant admins
     `UPDATE users SET workspace = 'amazon', role = 'super_admin' WHERE lower(username) = 'amazon'`,
     `UPDATE users SET workspace = 'sandeer', role = 'super_admin' WHERE lower(username) = 'sandeer'`,
   ];
   for (const sql of stmts) {
     try {
       await pool.query(sql);
-    } catch (err) {
-      console.error("ensureWorkspaceColumns:", err);
+    } catch (err: any) {
+      console.error("ensureWorkspaceColumns failed:", sql.slice(0, 80), err?.message || err);
     }
+  }
+
+  // Verify queue.workspace exists; if not, try once more without DEFAULT (older PG)
+  try {
+    const check = await pool.query(`
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_name = 'queue' AND column_name = 'workspace'
+      LIMIT 1
+    `);
+    if (!check.rowCount) {
+      console.warn("queue.workspace still missing — retrying ALTER without DEFAULT");
+      await pool.query(`ALTER TABLE queue ADD COLUMN workspace text`);
+      await pool.query(`UPDATE queue SET workspace = 'main' WHERE workspace IS NULL`);
+    }
+  } catch (err: any) {
+    console.error("queue.workspace verify/retry:", err?.message || err);
   }
 }
 
@@ -80,9 +103,7 @@ async function backfillTrackingLogWorkspace() {
         AND tl.workspace IS DISTINCT FROM q.workspace
     `);
     if (res.rowCount && res.rowCount > 0) {
-      console.log(
-        `backfillTrackingLogWorkspace: fixed ${res.rowCount} rows`
-      );
+      console.log(`backfillTrackingLogWorkspace: fixed ${res.rowCount} rows`);
     }
     if (!flag.rowCount) {
       await pool.query(
@@ -116,7 +137,6 @@ async function ensureEmailWorkspaceUnique() {
     console.error("ensureEmailWorkspaceUnique:", err);
   }
 }
-void ensureEmailWorkspaceUnique();
 
 async function isolateAmazonSmtpV3() {
   try {
@@ -158,7 +178,6 @@ async function isolateAmazonSmtpV3() {
     console.error("isolateAmazonSmtpV3:", err);
   }
 }
-void isolateAmazonSmtpV3();
 
 async function ensureTenantAdmin(
   username: string,
@@ -193,5 +212,26 @@ async function ensureTenantAdmin(
   }
 }
 
-void ensureTenantAdmin("amazon", "amazon");
-void ensureTenantAdmin("sandeer", "sandeer");
+/** Await this before any workspace-filtered query (dashboard, queue, etc.). */
+export async function ensureSchemaReady(): Promise<void> {
+  if (!globalForDb.__schemaReadyPromise) {
+    globalForDb.__schemaReadyPromise = (async () => {
+      await ensureSmtpColumns();
+      await ensureWorkspaceColumns();
+      await ensureEmailWorkspaceUnique();
+      await isolateAmazonSmtpV3();
+      await ensureTenantAdmin("amazon", "amazon");
+      await ensureTenantAdmin("sandeer", "sandeer");
+      console.log("[DB] schemaReady complete");
+    })().catch((err) => {
+      // Allow retry on next call
+      globalForDb.__schemaReadyPromise = undefined;
+      console.error("[DB] schemaReady failed:", err);
+      throw err;
+    });
+  }
+  return globalForDb.__schemaReadyPromise;
+}
+
+// Kick off on cold start (non-blocking)
+void ensureSchemaReady();
