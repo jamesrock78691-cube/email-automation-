@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db, ensureSchemaReady } from "@/db";
+import { db, pool, ensureSchemaReady, forceQueueWorkspaceColumn } from "@/db";
 import {
   queue,
   gmailAccounts,
@@ -15,10 +15,29 @@ import {
   normalizeRole,
 } from "@/lib/authSession";
 
+async function countQueue(ws: string, status?: string): Promise<number> {
+  if (status) {
+    const r = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM queue WHERE workspace = $1 AND status = $2`,
+      [ws, status]
+    );
+    return Number(r.rows[0]?.n || 0);
+  }
+  const r = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM queue WHERE workspace = $1`,
+    [ws]
+  );
+  return Number(r.rows[0]?.n || 0);
+}
+
 export async function GET(req: NextRequest) {
   try {
-    // Ensure queue.workspace (and other tenant columns) exist before filtering
-    await ensureSchemaReady();
+    try {
+      await ensureSchemaReady();
+    } catch (e: any) {
+      console.error("ensureSchemaReady:", e?.message || e);
+    }
+    await forceQueueWorkspaceColumn();
 
     const session = getSessionFromRequest(req);
     if (!session) {
@@ -74,163 +93,62 @@ export async function GET(req: NextRequest) {
       }
 
       if (operatorGmailIds.length > 0) {
-        const sentVia = await db
-          .select({ value: count() })
-          .from(queue)
-          .where(
-            and(
-              eq(queue.status, "sent"),
-              inArray(queue.gmailUsedId, operatorGmailIds),
-              workspaceSql(queue.workspace, ws)
-            )
+        sentCount = await (async () => {
+          const r = await pool.query(
+            `SELECT COUNT(*)::int AS n FROM queue
+             WHERE workspace = $1 AND status = 'sent' AND gmail_used_id = ANY($2::int[])`,
+            [ws, operatorGmailIds]
           );
-        const viaN = sentVia[0]?.value || 0;
-        if (viaN > 0) sentCount = viaN;
+          const n = Number(r.rows[0]?.n || 0);
+          return n > 0 ? n : sentCount;
+        })();
 
-        const mySent = await db
-          .select({ trackingId: queue.trackingId, email: queue.email })
-          .from(queue)
-          .where(
-            and(
-              inArray(queue.gmailUsedId, operatorGmailIds),
-              workspaceSql(queue.workspace, ws)
-            )
+        pendingCount = await countQueue(ws, "pending");
+        sendingCount = await countQueue(ws, "sending");
+        failedCount = await (async () => {
+          const r = await pool.query(
+            `SELECT COUNT(*)::int AS n FROM queue
+             WHERE workspace = $1 AND status = 'failed' AND gmail_used_id = ANY($2::int[])`,
+            [ws, operatorGmailIds]
           );
-        const myTrackIds = mySent
-          .map((r) => r.trackingId)
-          .filter(Boolean) as string[];
-
-        if (myTrackIds.length > 0) {
-          const openEvents = await db
-            .select({ value: count() })
-            .from(trackingLogs)
-            .where(inArray(trackingLogs.trackingId, myTrackIds));
-          totalOpenEvents = openEvents[0]?.value || 0;
-
-          const uniq = await db
-            .select({
-              value: sql<number>`count(distinct coalesce(${trackingLogs.email}, ${trackingLogs.trackingId}))`,
-            })
-            .from(trackingLogs)
-            .where(inArray(trackingLogs.trackingId, myTrackIds));
-          uniqueOpens = Number(uniq[0]?.value || 0);
-          openedCount = uniqueOpens;
-        }
-
-        const failedVia = await db
-          .select({ value: count() })
-          .from(queue)
-          .where(
-            and(
-              eq(queue.status, "failed"),
-              inArray(queue.gmailUsedId, operatorGmailIds),
-              workspaceSql(queue.workspace, ws)
-            )
-          );
-        failedCount = failedVia[0]?.value || 0;
-
-        const pendingEmailsResult = await db
-          .select({ value: count() })
-          .from(queue)
-          .where(
-            and(
-              eq(queue.status, "pending"),
-              workspaceSql(queue.workspace, ws)
-            )
-          );
-        pendingCount = pendingEmailsResult[0]?.value || 0;
-
-        const sendingEmailsResult = await db
-          .select({ value: count() })
-          .from(queue)
-          .where(
-            and(
-              eq(queue.status, "sending"),
-              workspaceSql(queue.workspace, ws)
-            )
-          );
-        sendingCount = sendingEmailsResult[0]?.value || 0;
-
+          return Number(r.rows[0]?.n || 0);
+        })();
         totalCount = sentCount + pendingCount + sendingCount + failedCount;
       } else {
         totalCount = sentCount;
       }
     } else {
-      const totalEmailsResult = await db
-        .select({ value: count() })
-        .from(queue)
-        .where(workspaceSql(queue.workspace, ws));
-      totalCount = totalEmailsResult[0]?.value || 0;
-
-      const sentEmailsResult = await db
-        .select({ value: count() })
-        .from(queue)
-        .where(
-          and(eq(queue.status, "sent"), workspaceSql(queue.workspace, ws))
-        );
-      sentCount = sentEmailsResult[0]?.value || 0;
-
-      const pendingEmailsResult = await db
-        .select({ value: count() })
-        .from(queue)
-        .where(
-          and(
-            eq(queue.status, "pending"),
-            workspaceSql(queue.workspace, ws)
-          )
-        );
-      pendingCount = pendingEmailsResult[0]?.value || 0;
-
-      const sendingEmailsResult = await db
-        .select({ value: count() })
-        .from(queue)
-        .where(
-          and(
-            eq(queue.status, "sending"),
-            workspaceSql(queue.workspace, ws)
-          )
-        );
-      sendingCount = sendingEmailsResult[0]?.value || 0;
-
-      const failedEmailsResult = await db
-        .select({ value: count() })
-        .from(queue)
-        .where(
-          and(
-            eq(queue.status, "failed"),
-            workspaceSql(queue.workspace, ws)
-          )
-        );
-      failedCount = failedEmailsResult[0]?.value || 0;
+      totalCount = await countQueue(ws);
+      sentCount = await countQueue(ws, "sent");
+      pendingCount = await countQueue(ws, "pending");
+      sendingCount = await countQueue(ws, "sending");
+      failedCount = await countQueue(ws, "failed");
 
       try {
-        await db.execute(sql`
-          UPDATE tracking_logs tl
-          SET workspace = q.workspace
-          FROM queue q
-          WHERE tl.tracking_id = q.tracking_id
-            AND q.workspace = ${ws}
-            AND tl.workspace IS DISTINCT FROM q.workspace
-        `);
+        await pool.query(
+          `UPDATE tracking_logs tl
+           SET workspace = q.workspace
+           FROM queue q
+           WHERE tl.tracking_id = q.tracking_id
+             AND q.workspace = $1
+             AND tl.workspace IS DISTINCT FROM q.workspace`,
+          [ws]
+        );
       } catch (e) {
         console.error("dashboard open workspace sync:", e);
       }
 
       try {
-        const sumRow = await db
-          .select({
-            value: sql<number>`coalesce(sum(${queue.openCount}), 0)`,
-          })
-          .from(queue)
-          .where(workspaceSql(queue.workspace, ws));
-        const sumOpens = Number(sumRow[0]?.value || 0);
-
-        const logCount = await db
-          .select({ value: count() })
-          .from(trackingLogs)
-          .where(workspaceSql(trackingLogs.workspace, ws));
-        const logsN = Number(logCount[0]?.value || 0);
-
+        const sumRow = await pool.query(
+          `SELECT coalesce(sum(open_count), 0)::int AS n FROM queue WHERE workspace = $1`,
+          [ws]
+        );
+        const sumOpens = Number(sumRow.rows[0]?.n || 0);
+        const logCount = await pool.query(
+          `SELECT COUNT(*)::int AS n FROM tracking_logs WHERE workspace = $1`,
+          [ws]
+        );
+        const logsN = Number(logCount.rows[0]?.n || 0);
         totalOpenEvents = sumOpens > 0 ? sumOpens : logsN;
       } catch (e) {
         console.error("dashboard totalOpenEvents:", e);
@@ -238,30 +156,20 @@ export async function GET(req: NextRequest) {
       }
 
       try {
-        const qOpened = await db
-          .select({ value: count() })
-          .from(queue)
-          .where(
-            and(
-              workspaceSql(queue.workspace, ws),
-              sql`coalesce(${queue.openCount}, 0) > 0`
-            )
-          );
-        const fromQueue = Number(qOpened[0]?.value || 0);
-
-        const logUniq = await db
-          .select({
-            value: sql<number>`count(distinct coalesce(nullif(trim(${trackingLogs.email}), ''), ${trackingLogs.trackingId}))`,
-          })
-          .from(trackingLogs)
-          .where(workspaceSql(trackingLogs.workspace, ws));
-        const fromLogs = Number(logUniq[0]?.value || 0);
-
+        const qOpened = await pool.query(
+          `SELECT COUNT(*)::int AS n FROM queue
+           WHERE workspace = $1 AND coalesce(open_count, 0) > 0`,
+          [ws]
+        );
+        const fromQueue = Number(qOpened.rows[0]?.n || 0);
+        const logUniq = await pool.query(
+          `SELECT COUNT(DISTINCT coalesce(nullif(trim(email), ''), tracking_id))::int AS n
+           FROM tracking_logs WHERE workspace = $1`,
+          [ws]
+        );
+        const fromLogs = Number(logUniq.rows[0]?.n || 0);
         uniqueOpens = Math.max(fromQueue, fromLogs);
         openedCount = uniqueOpens;
-        console.log(
-          `[DASH] ws=${ws} uniqueOpens=${uniqueOpens} fromQueue=${fromQueue} fromLogs=${fromLogs} totalEvents=${totalOpenEvents}`
-        );
       } catch (e) {
         console.error("dashboard uniqueOpens:", e);
         uniqueOpens = 0;
@@ -269,165 +177,162 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    const activeGmailResult = await db
-      .select({ value: count() })
-      .from(gmailAccounts)
-      .where(
-        and(
-          eq(gmailAccounts.status, "enabled"),
-          workspaceSql(gmailAccounts.workspace, ws)
-        )
+    let activeGmailCount = 0;
+    let totalGmailCount = 0;
+    try {
+      const a = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM gmail_accounts WHERE workspace = $1 AND status = 'enabled'`,
+        [ws]
       );
-    const activeGmailCount = activeGmailResult[0]?.value || 0;
-
-    const totalGmailResult = await db
-      .select({ value: count() })
-      .from(gmailAccounts)
-      .where(workspaceSql(gmailAccounts.workspace, ws));
-    const totalGmailCount = totalGmailResult[0]?.value || 0;
+      activeGmailCount = Number(a.rows[0]?.n || 0);
+      const t = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM gmail_accounts WHERE workspace = $1`,
+        [ws]
+      );
+      totalGmailCount = Number(t.rows[0]?.n || 0);
+    } catch (e) {
+      console.error("gmail counts:", e);
+    }
 
     let templatesCount = 0;
     try {
-      const tRes = await db
-        .select({ value: count() })
-        .from(templates)
-        .where(workspaceSql(templates.workspace, ws));
-      templatesCount = tRes[0]?.value || 0;
+      const tRes = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM templates WHERE workspace = $1`,
+        [ws]
+      );
+      templatesCount = Number(tRes.rows[0]?.n || 0);
     } catch {
       templatesCount = 0;
     }
 
-    const campaignsResult = await db
-      .select({ value: count() })
-      .from(campaigns)
-      .where(workspaceSql(campaigns.workspace, ws));
-    const campaignsCount = campaignsResult[0]?.value || 0;
+    let campaignsCount = 0;
+    try {
+      const cRes = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM campaigns WHERE workspace = $1`,
+        [ws]
+      );
+      campaignsCount = Number(cRes.rows[0]?.n || 0);
+    } catch {
+      campaignsCount = 0;
+    }
 
     const openRate =
       sentCount > 0 ? Math.round((openedCount / sentCount) * 100) : 0;
 
     let recentQueueLogs: any[] = [];
-    if (session && role === "operator" && operatorGmailIds.length > 0) {
-      recentQueueLogs = await db
-        .select()
-        .from(queue)
-        .where(
-          and(
-            inArray(queue.gmailUsedId, operatorGmailIds),
-            workspaceSql(queue.workspace, ws)
+    try {
+      if (session && role === "operator" && operatorGmailIds.length > 0) {
+        recentQueueLogs = await db
+          .select()
+          .from(queue)
+          .where(
+            and(
+              inArray(queue.gmailUsedId, operatorGmailIds),
+              workspaceSql(queue.workspace, ws)
+            )
           )
-        )
-        .orderBy(desc(queue.id))
-        .limit(50);
-    } else {
-      recentQueueLogs = await db
-        .select()
-        .from(queue)
-        .where(workspaceSql(queue.workspace, ws))
-        .orderBy(desc(queue.id))
-        .limit(50);
+          .orderBy(desc(queue.id))
+          .limit(50);
+      } else {
+        const rq = await pool.query(
+          `SELECT * FROM queue WHERE workspace = $1 ORDER BY id DESC LIMIT 50`,
+          [ws]
+        );
+        recentQueueLogs = rq.rows;
+      }
+    } catch (e) {
+      console.error("recentQueue:", e);
+      recentQueueLogs = [];
     }
 
     let accountsList: any[] = [];
-    if (session && role === "operator" && operatorGmailIds.length > 0) {
-      accountsList = await db
-        .select()
-        .from(gmailAccounts)
-        .where(
-          and(
-            inArray(gmailAccounts.id, operatorGmailIds),
-            workspaceSql(gmailAccounts.workspace, ws)
-          )
+    try {
+      if (session && role === "operator" && operatorGmailIds.length > 0) {
+        accountsList = await db
+          .select()
+          .from(gmailAccounts)
+          .where(
+            and(
+              inArray(gmailAccounts.id, operatorGmailIds),
+              workspaceSql(gmailAccounts.workspace, ws)
+            )
+          );
+      } else if (role !== "operator") {
+        const ac = await pool.query(
+          `SELECT * FROM gmail_accounts WHERE workspace = $1`,
+          [ws]
         );
-    } else if (role !== "operator") {
-      accountsList = await db
-        .select()
-        .from(gmailAccounts)
-        .where(workspaceSql(gmailAccounts.workspace, ws));
+        accountsList = ac.rows;
+      }
+    } catch (e) {
+      console.error("accounts:", e);
     }
 
-    const recentOpensRaw = await db
-      .select({
-        id: trackingLogs.id,
-        openedAt: trackingLogs.openedAt,
-        ipAddress: trackingLogs.ipAddress,
-        userAgent: trackingLogs.userAgent,
-        browser: trackingLogs.browser,
-        device: trackingLogs.device,
-        trackingId: trackingLogs.trackingId,
-        queueId: trackingLogs.queueId,
-        logEmail: trackingLogs.email,
-        logMarkName: trackingLogs.markName,
-        logReferenceNo: trackingLogs.referenceNo,
-        queueReferenceNo: queue.referenceNo,
-        serialNo: queue.serialNo,
-        queueMarkName: queue.markName,
-        queueEmail: queue.email,
-      })
-      .from(trackingLogs)
-      .leftJoin(
-        queue,
-        or(
-          eq(trackingLogs.queueId, queue.id),
-          eq(trackingLogs.trackingId, queue.trackingId)
+    let recentOpens: any[] = [];
+    try {
+      const recentOpensRaw = await db
+        .select({
+          id: trackingLogs.id,
+          openedAt: trackingLogs.openedAt,
+          ipAddress: trackingLogs.ipAddress,
+          userAgent: trackingLogs.userAgent,
+          browser: trackingLogs.browser,
+          device: trackingLogs.device,
+          trackingId: trackingLogs.trackingId,
+          queueId: trackingLogs.queueId,
+          logEmail: trackingLogs.email,
+          logMarkName: trackingLogs.markName,
+          logReferenceNo: trackingLogs.referenceNo,
+          queueReferenceNo: queue.referenceNo,
+          serialNo: queue.serialNo,
+          queueMarkName: queue.markName,
+          queueEmail: queue.email,
+        })
+        .from(trackingLogs)
+        .leftJoin(
+          queue,
+          or(
+            eq(trackingLogs.queueId, queue.id),
+            eq(trackingLogs.trackingId, queue.trackingId)
+          )
         )
-      )
-      .where(
-        or(
-          workspaceSql(trackingLogs.workspace, ws),
-          workspaceSql(queue.workspace, ws)
-        )
-      )
-      .orderBy(desc(trackingLogs.openedAt))
-      .limit(40);
-
-    let recentOpens = recentOpensRaw.map((op) => {
-      const isManual = op.queueId == null;
-      return {
-        id: op.id,
-        openedAt: op.openedAt,
-        ipAddress: op.ipAddress,
-        userAgent: op.userAgent,
-        browser: op.browser,
-        device: op.device,
-        trackingId: op.trackingId,
-        queueId: op.queueId,
-        source: isManual ? "manual" : "auto",
-        referenceNo:
-          op.queueReferenceNo ||
-          op.logReferenceNo ||
-          (isManual ? "MANUAL" : "—"),
-        markName:
-          op.queueMarkName ||
-          op.logMarkName ||
-          (isManual ? "Manual Send" : "—"),
-        email: op.queueEmail || op.logEmail || "",
-        serialNo: op.serialNo || "",
-        gmailUsedId: null as number | null,
-      };
-    });
-
-    if (session && role === "operator" && operatorGmailIds.length > 0) {
-      const mySent = await db
-        .select({ email: queue.email, trackingId: queue.trackingId })
-        .from(queue)
         .where(
-          and(
-            inArray(queue.gmailUsedId, operatorGmailIds),
+          or(
+            workspaceSql(trackingLogs.workspace, ws),
             workspaceSql(queue.workspace, ws)
           )
-        );
-      const myEmails = new Set(
-        mySent.map((r) => (r.email || "").toLowerCase())
-      );
-      const myTracks = new Set(
-        mySent.map((r) => r.trackingId).filter(Boolean)
-      );
-      recentOpens = recentOpens.filter(
-        (op) =>
-          (op.email && myEmails.has(op.email.toLowerCase())) ||
-          (op.trackingId && myTracks.has(op.trackingId))
-      );
+        )
+        .orderBy(desc(trackingLogs.openedAt))
+        .limit(40);
+
+      recentOpens = recentOpensRaw.map((op) => {
+        const isManual = op.queueId == null;
+        return {
+          id: op.id,
+          openedAt: op.openedAt,
+          ipAddress: op.ipAddress,
+          userAgent: op.userAgent,
+          browser: op.browser,
+          device: op.device,
+          trackingId: op.trackingId,
+          queueId: op.queueId,
+          source: isManual ? "manual" : "auto",
+          referenceNo:
+            op.queueReferenceNo ||
+            op.logReferenceNo ||
+            (isManual ? "MANUAL" : "—"),
+          markName:
+            op.queueMarkName ||
+            op.logMarkName ||
+            (isManual ? "Manual Send" : "—"),
+          email: op.queueEmail || op.logEmail || "",
+          serialNo: op.serialNo || "",
+          gmailUsedId: null as number | null,
+        };
+      });
+    } catch (e) {
+      console.error("recentOpens:", e);
+      recentOpens = [];
     }
 
     return NextResponse.json({
@@ -456,8 +361,13 @@ export async function GET(req: NextRequest) {
       user: session.username,
     });
   } catch (error: any) {
+    console.error("dashboard GET:", error);
     return NextResponse.json(
-      { success: false, error: error.message },
+      {
+        success: false,
+        error: error?.message || "Server error",
+        detail: error?.cause?.message || error?.code || undefined,
+      },
       { status: 500 }
     );
   }
