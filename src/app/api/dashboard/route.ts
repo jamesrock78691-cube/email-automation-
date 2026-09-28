@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/db";
+import { db, ensureSchemaReady } from "@/db";
 import {
   queue,
   gmailAccounts,
@@ -17,6 +17,9 @@ import {
 
 export async function GET(req: NextRequest) {
   try {
+    // Ensure queue.workspace (and other tenant columns) exist before filtering
+    await ensureSchemaReady();
+
     const session = getSessionFromRequest(req);
     if (!session) {
       return NextResponse.json(
