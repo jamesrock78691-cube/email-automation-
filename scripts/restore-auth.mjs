@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Restore auth/route.ts if corrupted, then apply schemaReady + login fixes. */
+/** Restore auth/route.ts if corrupted/truncated, then apply schemaReady + login fixes. */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,17 @@ const SOURCES = [
   "https://cdn.jsdelivr.net/gh/jamesrock78691-cube/email-automation-@00e6f934938117c48a9f1dd1baf077f16968f60f/src/app/api/auth/route.ts",
   "https://raw.githubusercontent.com/jamesrock78691-cube/email-automation-/00e6f934938117c48a9f1dd1baf077f16968f60f/src/app/api/auth/route.ts",
 ];
+
+function isComplete(text) {
+  return (
+    text &&
+    text.length > 15000 &&
+    text.includes("export async function POST") &&
+    text.includes("forgot_password") &&
+    text.includes("manage_users") &&
+    !text.includes("SEE_AUTH")
+  );
+}
 
 function patch(text) {
   if (!text.includes("import { db, ensureSchemaReady }")) {
@@ -73,36 +84,34 @@ function patch(text) {
   return text;
 }
 
-async function main() {
-  let text = "";
-  const existing = fs.existsSync(OUT) ? fs.readFileSync(OUT, "utf8") : "";
-  if (
-    existing.includes("export async function POST") &&
-    existing.length > 5000 &&
-    !existing.includes("SEE_AUTH")
-  ) {
-    text = patch(existing);
-    fs.writeFileSync(OUT, text);
-    console.log("restore-auth: patched existing", text.length);
-    return;
-  }
+async function fetchSource() {
   for (const url of SOURCES) {
     try {
       const res = await fetch(url);
       if (!res.ok) continue;
-      text = await res.text();
-      if (text.includes("export async function POST") && text.length > 5000) {
-        text = patch(text);
-        fs.mkdirSync(path.dirname(OUT), { recursive: true });
-        fs.writeFileSync(OUT, text);
-        console.log("restore-auth: restored from CDN", text.length);
-        return;
-      }
+      const text = await res.text();
+      if (isComplete(text)) return text;
     } catch (e) {
-      console.error(e);
+      console.error("fetch", url, e);
     }
   }
-  throw new Error("restore-auth failed");
+  return null;
+}
+
+async function main() {
+  const existing = fs.existsSync(OUT) ? fs.readFileSync(OUT, "utf8") : "";
+  if (isComplete(existing)) {
+    const text = patch(existing);
+    fs.writeFileSync(OUT, text);
+    console.log("restore-auth: patched existing", text.length);
+    return;
+  }
+  const remote = await fetchSource();
+  if (!remote) throw new Error("restore-auth failed: no complete source");
+  const text = patch(remote);
+  fs.mkdirSync(path.dirname(OUT), { recursive: true });
+  fs.writeFileSync(OUT, text);
+  console.log("restore-auth: restored full auth from CDN", text.length);
 }
 
 main().catch((e) => {
