@@ -1,10 +1,15 @@
 import { drizzle } from "drizzle-orm/node-postgres";
-import { Pool } from "pg";
+import { Pool, Client } from "pg";
 
 const databaseUrl = process.env.DATABASE_URL;
 
 if (!databaseUrl) {
   throw new Error("DATABASE_URL is required");
+}
+
+/** Neon -pooler host can block DDL in transaction mode. Use direct host for ALTER. */
+function ddlConnectionString() {
+  return String(databaseUrl).replace("-pooler.", ".");
 }
 
 const globalForDb = globalThis as typeof globalThis & {
@@ -24,181 +29,204 @@ if (process.env.NODE_ENV !== "production") {
 
 export const db = drizzle(pool);
 
-/** Create core tables if they do not exist (fresh / wiped DB). */
-async function ensureCoreTables() {
-  const creates = [
-    `CREATE TABLE IF NOT EXISTS users (
-      id serial PRIMARY KEY,
-      username text NOT NULL UNIQUE,
-      password_hash text NOT NULL,
-      role text DEFAULT 'admin' NOT NULL,
-      workspace text DEFAULT 'main' NOT NULL,
-      created_at timestamp DEFAULT now() NOT NULL
-    )`,
-    `CREATE TABLE IF NOT EXISTS settings (
-      id serial PRIMARY KEY,
-      key text NOT NULL UNIQUE,
-      value text NOT NULL
-    )`,
-    `CREATE TABLE IF NOT EXISTS gmail_accounts (
-      id serial PRIMARY KEY,
-      email text NOT NULL,
-      smtp_username text,
-      from_email text,
-      sender_name text DEFAULT 'Trademark Processing Department' NOT NULL,
-      reply_to_email text,
-      provider text DEFAULT 'gmail' NOT NULL,
-      app_password text NOT NULL,
-      smtp_host text DEFAULT 'smtp.gmail.com' NOT NULL,
-      smtp_port integer DEFAULT 465 NOT NULL,
-      secure boolean DEFAULT true NOT NULL,
-      priority integer DEFAULT 1 NOT NULL,
-      daily_limit integer DEFAULT 500 NOT NULL,
-      minute_limit integer DEFAULT 50 NOT NULL,
-      sent_today integer DEFAULT 0 NOT NULL,
-      sent_this_minute integer DEFAULT 0 NOT NULL,
-      status text DEFAULT 'enabled' NOT NULL,
-      last_used_at timestamp,
-      cooldown_until timestamp,
-      error_count integer DEFAULT 0 NOT NULL,
-      workspace text DEFAULT 'main' NOT NULL,
-      created_at timestamp DEFAULT now() NOT NULL
-    )`,
-    `CREATE TABLE IF NOT EXISTS templates (
-      id serial PRIMARY KEY,
-      name text NOT NULL,
-      subject text NOT NULL,
-      body_html text NOT NULL,
-      attachment_path text,
-      workspace text DEFAULT 'main' NOT NULL,
-      created_at timestamp DEFAULT now() NOT NULL
-    )`,
-    `CREATE TABLE IF NOT EXISTS campaigns (
-      id serial PRIMARY KEY,
-      name text NOT NULL,
-      template_id integer,
-      status text DEFAULT 'draft' NOT NULL,
-      workspace text DEFAULT 'main' NOT NULL,
-      created_at timestamp DEFAULT now() NOT NULL
-    )`,
-    `CREATE TABLE IF NOT EXISTS queue (
-      id serial PRIMARY KEY,
-      campaign_id integer,
-      reference_no text,
-      serial_no text,
-      mark_name text,
-      filing_date text,
-      email text NOT NULL,
-      cc text,
-      bcc text,
-      subject text,
-      template_id integer,
-      status text DEFAULT 'pending' NOT NULL,
-      tracking_id text NOT NULL UNIQUE,
-      tries integer DEFAULT 0 NOT NULL,
-      max_tries integer DEFAULT 3 NOT NULL,
-      error_message text,
-      gmail_used_id integer,
-      gmail_used_email text,
-      sent_at timestamp,
-      open_count integer DEFAULT 0 NOT NULL,
-      last_opened_at timestamp,
-      workspace text DEFAULT 'main' NOT NULL,
-      created_at timestamp DEFAULT now() NOT NULL
-    )`,
-    `CREATE TABLE IF NOT EXISTS tracking_logs (
-      id serial PRIMARY KEY,
-      queue_id integer,
-      tracking_id text NOT NULL,
-      ip_address text,
-      user_agent text,
-      browser text,
-      device text,
-      opened_at timestamp DEFAULT now() NOT NULL,
-      email text,
-      mark_name text,
-      reference_no text,
-      workspace text DEFAULT 'main' NOT NULL
-    )`,
-  ];
-  for (const sql of creates) {
+async function withDdlClient<T>(fn: (c: Client) => Promise<T>): Promise<T> {
+  const client = new Client({
+    connectionString: ddlConnectionString(),
+    ssl:
+      ddlConnectionString().includes("localhost") ||
+      ddlConnectionString().includes("127.0.0.1")
+        ? false
+        : { rejectUnauthorized: false },
+  });
+  await client.connect();
+  try {
+    return await fn(client);
+  } finally {
     try {
-      await pool.query(sql);
-    } catch (err: any) {
-      console.error("ensureCoreTables:", err?.message || err);
+      await client.end();
+    } catch {
+      /* ignore */
     }
   }
 }
 
-async function ensureSmtpColumns() {
-  try {
-    await pool.query(
-      `ALTER TABLE gmail_accounts ADD COLUMN IF NOT EXISTS smtp_username text`
-    );
-    await pool.query(
-      `ALTER TABLE gmail_accounts ADD COLUMN IF NOT EXISTS from_email text`
-    );
-  } catch (err) {
-    console.error("ensureSmtpColumns:", err);
-  }
+async function addColumnSafe(
+  client: Client,
+  table: string,
+  column: string,
+  typeSql: string
+) {
+  // Works on PG < 11 (no ADD COLUMN IF NOT EXISTS)
+  await client.query(`
+    DO $ddl$
+    BEGIN
+      ALTER TABLE public.${table} ADD COLUMN ${column} ${typeSql};
+    EXCEPTION
+      WHEN duplicate_column THEN NULL;
+      WHEN undefined_table THEN NULL;
+    END
+    $ddl$;
+  `);
+}
+
+async function ensureCoreTables() {
+  await withDdlClient(async (client) => {
+    const creates = [
+      `CREATE TABLE IF NOT EXISTS public.users (
+        id serial PRIMARY KEY,
+        username text NOT NULL UNIQUE,
+        password_hash text NOT NULL,
+        role text DEFAULT 'admin' NOT NULL,
+        workspace text DEFAULT 'main' NOT NULL,
+        created_at timestamp DEFAULT now() NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS public.settings (
+        id serial PRIMARY KEY,
+        key text NOT NULL UNIQUE,
+        value text NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS public.gmail_accounts (
+        id serial PRIMARY KEY,
+        email text NOT NULL,
+        smtp_username text,
+        from_email text,
+        sender_name text DEFAULT 'Trademark Processing Department' NOT NULL,
+        reply_to_email text,
+        provider text DEFAULT 'gmail' NOT NULL,
+        app_password text NOT NULL,
+        smtp_host text DEFAULT 'smtp.gmail.com' NOT NULL,
+        smtp_port integer DEFAULT 465 NOT NULL,
+        secure boolean DEFAULT true NOT NULL,
+        priority integer DEFAULT 1 NOT NULL,
+        daily_limit integer DEFAULT 500 NOT NULL,
+        minute_limit integer DEFAULT 50 NOT NULL,
+        sent_today integer DEFAULT 0 NOT NULL,
+        sent_this_minute integer DEFAULT 0 NOT NULL,
+        status text DEFAULT 'enabled' NOT NULL,
+        last_used_at timestamp,
+        cooldown_until timestamp,
+        error_count integer DEFAULT 0 NOT NULL,
+        workspace text DEFAULT 'main' NOT NULL,
+        created_at timestamp DEFAULT now() NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS public.templates (
+        id serial PRIMARY KEY,
+        name text NOT NULL,
+        subject text NOT NULL,
+        body_html text NOT NULL,
+        attachment_path text,
+        workspace text DEFAULT 'main' NOT NULL,
+        created_at timestamp DEFAULT now() NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS public.campaigns (
+        id serial PRIMARY KEY,
+        name text NOT NULL,
+        template_id integer,
+        status text DEFAULT 'draft' NOT NULL,
+        workspace text DEFAULT 'main' NOT NULL,
+        created_at timestamp DEFAULT now() NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS public.queue (
+        id serial PRIMARY KEY,
+        campaign_id integer,
+        reference_no text,
+        serial_no text,
+        mark_name text,
+        filing_date text,
+        email text NOT NULL,
+        cc text,
+        bcc text,
+        subject text,
+        template_id integer,
+        status text DEFAULT 'pending' NOT NULL,
+        tracking_id text NOT NULL UNIQUE,
+        tries integer DEFAULT 0 NOT NULL,
+        max_tries integer DEFAULT 3 NOT NULL,
+        error_message text,
+        gmail_used_id integer,
+        gmail_used_email text,
+        sent_at timestamp,
+        open_count integer DEFAULT 0 NOT NULL,
+        last_opened_at timestamp,
+        workspace text DEFAULT 'main' NOT NULL,
+        created_at timestamp DEFAULT now() NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS public.tracking_logs (
+        id serial PRIMARY KEY,
+        queue_id integer,
+        tracking_id text NOT NULL,
+        ip_address text,
+        user_agent text,
+        browser text,
+        device text,
+        opened_at timestamp DEFAULT now() NOT NULL,
+        email text,
+        mark_name text,
+        reference_no text,
+        workspace text DEFAULT 'main' NOT NULL
+      )`,
+    ];
+    for (const sql of creates) {
+      await client.query(sql);
+    }
+  });
 }
 
 export async function ensureWorkspaceColumns() {
-  const stmts = [
-    `ALTER TABLE users ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
-    `ALTER TABLE gmail_accounts ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
-    `ALTER TABLE templates ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
-    `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
-    `ALTER TABLE queue ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
-    `ALTER TABLE tracking_logs ADD COLUMN IF NOT EXISTS workspace text DEFAULT 'main'`,
-    `ALTER TABLE tracking_logs ADD COLUMN IF NOT EXISTS email text`,
-    `ALTER TABLE tracking_logs ADD COLUMN IF NOT EXISTS mark_name text`,
-    `ALTER TABLE tracking_logs ADD COLUMN IF NOT EXISTS reference_no text`,
-    `ALTER TABLE queue ADD COLUMN IF NOT EXISTS open_count integer DEFAULT 0`,
-    `ALTER TABLE queue ADD COLUMN IF NOT EXISTS last_opened_at timestamp`,
-    `UPDATE users SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
-    `UPDATE gmail_accounts SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
-    `UPDATE templates SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
-    `UPDATE campaigns SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
-    `UPDATE queue SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
-    `UPDATE tracking_logs SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
-    `UPDATE users SET workspace = 'amazon', role = 'super_admin' WHERE lower(username) = 'amazon'`,
-    `UPDATE users SET workspace = 'sandeer', role = 'super_admin' WHERE lower(username) = 'sandeer'`,
-  ];
-  for (const sql of stmts) {
-    try {
-      await pool.query(sql);
-    } catch (err: any) {
-      console.error(
-        "ensureWorkspaceColumns failed:",
-        sql.slice(0, 90),
-        err?.message || err
-      );
-    }
-  }
+  await withDdlClient(async (client) => {
+    await addColumnSafe(client, "users", "workspace", "text DEFAULT 'main'");
+    await addColumnSafe(client, "gmail_accounts", "workspace", "text DEFAULT 'main'");
+    await addColumnSafe(client, "templates", "workspace", "text DEFAULT 'main'");
+    await addColumnSafe(client, "campaigns", "workspace", "text DEFAULT 'main'");
+    await addColumnSafe(client, "queue", "workspace", "text DEFAULT 'main'");
+    await addColumnSafe(client, "tracking_logs", "workspace", "text DEFAULT 'main'");
+    await addColumnSafe(client, "tracking_logs", "email", "text");
+    await addColumnSafe(client, "tracking_logs", "mark_name", "text");
+    await addColumnSafe(client, "tracking_logs", "reference_no", "text");
+    await addColumnSafe(client, "queue", "open_count", "integer DEFAULT 0");
+    await addColumnSafe(client, "queue", "last_opened_at", "timestamp");
+    await addColumnSafe(client, "gmail_accounts", "smtp_username", "text");
+    await addColumnSafe(client, "gmail_accounts", "from_email", "text");
 
-  // Verify critical columns
-  for (const [table, col] of [
-    ["users", "workspace"],
-    ["queue", "workspace"],
-  ] as const) {
-    try {
-      const check = await pool.query(
+    const fills = [
+      `UPDATE public.users SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
+      `UPDATE public.gmail_accounts SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
+      `UPDATE public.templates SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
+      `UPDATE public.campaigns SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
+      `UPDATE public.queue SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
+      `UPDATE public.tracking_logs SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
+      `UPDATE public.users SET workspace = 'amazon', role = 'super_admin' WHERE lower(username) = 'amazon'`,
+      `UPDATE public.users SET workspace = 'sandeer', role = 'super_admin' WHERE lower(username) = 'sandeer'`,
+    ];
+    for (const sql of fills) {
+      try {
+        await client.query(sql);
+      } catch (err: any) {
+        console.error("fill workspace:", err?.message || err);
+      }
+    }
+
+    for (const table of ["users", "queue", "gmail_accounts", "templates", "campaigns", "tracking_logs"]) {
+      const check = await client.query(
         `SELECT 1 FROM information_schema.columns
-         WHERE table_name = $1 AND column_name = $2 LIMIT 1`,
-        [table, col]
+         WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'workspace'
+         LIMIT 1`,
+        [table]
       );
       if (!check.rowCount) {
-        console.warn(`${table}.${col} still missing — retrying ALTER`);
-        await pool.query(`ALTER TABLE ${table} ADD COLUMN ${col} text`);
-        await pool.query(
-          `UPDATE ${table} SET ${col} = 'main' WHERE ${col} IS NULL`
+        throw new Error(
+          `FATAL: public.${table}.workspace missing after ALTER. Check DB ALTER permission / DATABASE_URL.`
         );
       }
-    } catch (err: any) {
-      console.error(`${table}.${col} verify:`, err?.message || err);
     }
-  }
+    console.log("[DB] workspace columns verified on public.queue + users");
+  });
+}
+
+/** Call from dashboard/queue before any workspace filter. */
+export async function forceQueueWorkspaceColumn() {
+  await ensureCoreTables();
+  await ensureWorkspaceColumns();
 }
 
 async function backfillTrackingLogWorkspace() {
@@ -236,18 +264,20 @@ async function ensureEmailWorkspaceUnique() {
   try {
     await ensureWorkspaceColumns();
     await backfillTrackingLogWorkspace();
-    await pool.query(
-      `ALTER TABLE gmail_accounts DROP CONSTRAINT IF EXISTS gmail_accounts_email_key`
-    );
-    await pool.query(
-      `ALTER TABLE gmail_accounts DROP CONSTRAINT IF EXISTS gmail_accounts_email_unique`
-    );
-    await pool.query(`DROP INDEX IF EXISTS gmail_accounts_email_key`);
-    await pool.query(`DROP INDEX IF EXISTS gmail_accounts_email_unique`);
-    await pool.query(
-      `CREATE UNIQUE INDEX IF NOT EXISTS gmail_accounts_email_workspace_uidx
-       ON gmail_accounts (lower(email), workspace)`
-    );
+    await withDdlClient(async (client) => {
+      await client.query(
+        `ALTER TABLE gmail_accounts DROP CONSTRAINT IF EXISTS gmail_accounts_email_key`
+      );
+      await client.query(
+        `ALTER TABLE gmail_accounts DROP CONSTRAINT IF EXISTS gmail_accounts_email_unique`
+      );
+      await client.query(`DROP INDEX IF EXISTS gmail_accounts_email_key`);
+      await client.query(`DROP INDEX IF EXISTS gmail_accounts_email_unique`);
+      await client.query(
+        `CREATE UNIQUE INDEX IF NOT EXISTS gmail_accounts_email_workspace_uidx
+         ON gmail_accounts (lower(email), workspace)`
+      );
+    });
   } catch (err) {
     console.error("ensureEmailWorkspaceUnique:", err);
   }
@@ -313,7 +343,6 @@ async function ensureTenantAdmin(
       );
       console.log(`ensureTenantAdmin: created ${username} @ ${workspace}`);
     } else {
-      // Keep password if already set; only fix role/workspace
       await pool.query(
         `UPDATE users SET role = 'super_admin', workspace = $2
          WHERE lower(username) = $1`,
@@ -326,7 +355,6 @@ async function ensureTenantAdmin(
   }
 }
 
-/** Ensure default admin exists (main workspace). */
 async function ensureDefaultAdmin() {
   try {
     const existing = await pool.query(
@@ -352,12 +380,10 @@ async function ensureDefaultAdmin() {
   }
 }
 
-/** Await this before any DB query that needs schema (login, dashboard, queue). */
 export async function ensureSchemaReady(): Promise<void> {
   if (!globalForDb.__schemaReadyPromise) {
     globalForDb.__schemaReadyPromise = (async () => {
       await ensureCoreTables();
-      await ensureSmtpColumns();
       await ensureWorkspaceColumns();
       await ensureEmailWorkspaceUnique();
       await isolateAmazonSmtpV3();
