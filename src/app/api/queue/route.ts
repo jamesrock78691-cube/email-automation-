@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/db";
+import { db, ensureSchemaReady } from "@/db";
 import { queue, templates, campaigns } from "@/db/schema";
 import { eq, desc, and } from "drizzle-orm";
 import { randomUUID } from "crypto";
@@ -23,6 +23,7 @@ function unauthorized() {
 
 export async function GET(request: NextRequest) {
   try {
+    await ensureSchemaReady();
     const session = requireSessionWorkspace(request);
     if (!session) return unauthorized();
     const ws = session.workspace;
@@ -42,6 +43,7 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
+    await ensureSchemaReady();
     const session = requireSessionWorkspace(request);
     if (!session) return unauthorized();
     const ws = session.workspace;
@@ -204,7 +206,6 @@ export async function POST(request: NextRequest) {
           templateId != null && templateId !== ""
             ? Number(templateId)
             : null;
-        // Amazon → Amazon sheet; main → main sheet
         const result = await importPendingRowsToQueue(
           forcedId && !Number.isNaN(forcedId) ? forcedId : null,
           ws
