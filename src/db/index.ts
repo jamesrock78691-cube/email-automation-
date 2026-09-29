@@ -56,7 +56,6 @@ async function addColumnSafe(
   column: string,
   typeSql: string
 ) {
-  // Works on PG < 11 (no ADD COLUMN IF NOT EXISTS)
   await client.query(`
     DO $ddl$
     BEGIN
@@ -83,7 +82,8 @@ async function ensureCoreTables() {
       `CREATE TABLE IF NOT EXISTS public.settings (
         id serial PRIMARY KEY,
         key text NOT NULL UNIQUE,
-        value text NOT NULL
+        value text NOT NULL,
+        created_at timestamp DEFAULT now() NOT NULL
       )`,
       `CREATE TABLE IF NOT EXISTS public.gmail_accounts (
         id serial PRIMARY KEY,
@@ -114,6 +114,8 @@ async function ensureCoreTables() {
         name text NOT NULL,
         subject text NOT NULL,
         body_html text NOT NULL,
+        body_text text DEFAULT '' NOT NULL,
+        attachments_json text DEFAULT '[]' NOT NULL,
         attachment_path text,
         workspace text DEFAULT 'main' NOT NULL,
         created_at timestamp DEFAULT now() NOT NULL
@@ -187,6 +189,12 @@ export async function ensureWorkspaceColumns() {
     await addColumnSafe(client, "queue", "last_opened_at", "timestamp");
     await addColumnSafe(client, "gmail_accounts", "smtp_username", "text");
     await addColumnSafe(client, "gmail_accounts", "from_email", "text");
+    // Templates — required by drizzle schema / POST create
+    await addColumnSafe(client, "templates", "body_text", "text DEFAULT ''");
+    await addColumnSafe(client, "templates", "attachments_json", "text DEFAULT '[]'");
+    await addColumnSafe(client, "templates", "attachment_path", "text");
+    // Settings — list_users / agent_stats
+    await addColumnSafe(client, "settings", "created_at", "timestamp DEFAULT now()");
 
     const fills = [
       `UPDATE public.users SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
@@ -195,6 +203,8 @@ export async function ensureWorkspaceColumns() {
       `UPDATE public.campaigns SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
       `UPDATE public.queue SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
       `UPDATE public.tracking_logs SET workspace = 'main' WHERE workspace IS NULL OR workspace = ''`,
+      `UPDATE public.templates SET body_text = '' WHERE body_text IS NULL`,
+      `UPDATE public.templates SET attachments_json = '[]' WHERE attachments_json IS NULL`,
       `UPDATE public.users SET workspace = 'amazon', role = 'super_admin' WHERE lower(username) = 'amazon'`,
       `UPDATE public.users SET workspace = 'sandeer', role = 'super_admin' WHERE lower(username) = 'sandeer'`,
     ];
@@ -219,11 +229,20 @@ export async function ensureWorkspaceColumns() {
         );
       }
     }
-    console.log("[DB] workspace columns verified on public.queue + users");
+
+    // Verify templates body_text exists
+    const tCheck = await client.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'templates' AND column_name = 'body_text' LIMIT 1`
+    );
+    if (!tCheck.rowCount) {
+      throw new Error("FATAL: templates.body_text missing after ALTER");
+    }
+    console.log("[DB] workspace + templates columns verified");
   });
 }
 
-/** Call from dashboard/queue before any workspace filter. */
+/** Call from dashboard/queue/template before any query. */
 export async function forceQueueWorkspaceColumn() {
   await ensureCoreTables();
   await ensureWorkspaceColumns();
