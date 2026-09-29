@@ -145,12 +145,13 @@ async function ensureCoreTables() {
         tries integer DEFAULT 0 NOT NULL,
         max_tries integer DEFAULT 3 NOT NULL,
         error_message text,
+        retry_after timestamp,
+        last_error_type text,
         gmail_used_id integer,
         gmail_used_email text,
         sent_at timestamp,
         open_count integer DEFAULT 0 NOT NULL,
         last_opened_at timestamp,
-        retry_after timestamp,
         workspace text DEFAULT 'main' NOT NULL,
         created_at timestamp DEFAULT now() NOT NULL
       )`,
@@ -189,6 +190,7 @@ export async function ensureWorkspaceColumns() {
     await addColumnSafe(client, "queue", "open_count", "integer DEFAULT 0");
     await addColumnSafe(client, "queue", "last_opened_at", "timestamp");
     await addColumnSafe(client, "queue", "retry_after", "timestamp");
+    await addColumnSafe(client, "queue", "last_error_type", "text");
     await addColumnSafe(client, "gmail_accounts", "smtp_username", "text");
     await addColumnSafe(client, "gmail_accounts", "from_email", "text");
     await addColumnSafe(client, "templates", "body_text", "text DEFAULT ''");
@@ -237,7 +239,7 @@ export async function ensureWorkspaceColumns() {
     if (!tCheck.rowCount) {
       throw new Error("FATAL: templates.body_text missing after ALTER");
     }
-    console.log("[DB] workspace + templates + queue.retry_after verified");
+    console.log("[DB] workspace + templates + queue columns verified");
   });
 }
 
