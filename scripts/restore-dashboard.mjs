@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Restore dashboard route from last good commit + UI field mapping. */
+/** Restore dashboard: camelCase fields, sent in run panel, working recentOpens. */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -66,6 +66,63 @@ function mapAccountRow(r: any) {
 
 `;
 
+const OPENS_BLOCK = `
+    let recentOpens: any[] = [];
+    try {
+      const ro = await pool.query(
+        \`SELECT
+           tl.id,
+           tl.opened_at,
+           tl.ip_address,
+           tl.user_agent,
+           tl.browser,
+           tl.device,
+           tl.tracking_id,
+           tl.queue_id,
+           tl.email AS log_email,
+           tl.mark_name AS log_mark,
+           tl.reference_no AS log_ref,
+           q.reference_no AS q_ref,
+           q.serial_no AS q_serial,
+           q.mark_name AS q_mark,
+           q.email AS q_email,
+           q.gmail_used_email AS q_gmail
+         FROM tracking_logs tl
+         LEFT JOIN queue q
+           ON q.tracking_id = tl.tracking_id
+           OR (tl.queue_id IS NOT NULL AND q.id = tl.queue_id)
+         WHERE COALESCE(NULLIF(TRIM(tl.workspace), ''), q.workspace, 'main') = $1
+            OR q.workspace = $1
+         ORDER BY tl.opened_at DESC NULLS LAST
+         LIMIT 40\`,
+        [ws]
+      );
+      recentOpens = (ro.rows || []).map((op: any) => {
+        const isManual = op.queue_id == null && !op.q_email;
+        return {
+          id: op.id,
+          openedAt: op.opened_at,
+          ipAddress: op.ip_address,
+          userAgent: op.user_agent,
+          browser: op.browser,
+          device: op.device,
+          trackingId: op.tracking_id,
+          queueId: op.queue_id,
+          source: isManual ? "manual" : "auto",
+          referenceNo: op.q_ref || op.log_ref || (isManual ? "MANUAL" : "—"),
+          markName: op.q_mark || op.log_mark || (isManual ? "Manual Send" : "—"),
+          email: op.q_email || op.log_email || "",
+          serialNo: op.q_serial || "",
+          gmailUsedEmail: op.q_gmail || null,
+          gmailUsedId: null as number | null,
+        };
+      });
+    } catch (e) {
+      console.error("recentOpens:", e);
+      recentOpens = [];
+    }
+`;
+
 async function main() {
   const res = await fetch(SOURCE, { redirect: "follow" });
   if (!res.ok) throw new Error("HTTP " + res.status);
@@ -103,6 +160,13 @@ async function main() {
         );
         recentQueueLogs = rq.rows;`
   );
+
+  // Replace broken drizzle recentOpens block with raw SQL
+  const opensStart = text.indexOf("    let recentOpens: any[] = [];");
+  const opensEnd = text.indexOf("    return NextResponse.json({");
+  if (opensStart >= 0 && opensEnd > opensStart) {
+    text = text.slice(0, opensStart) + OPENS_BLOCK + "\n" + text.slice(opensEnd);
+  }
 
   text = text.replace(
     `      accounts: accountsList,
