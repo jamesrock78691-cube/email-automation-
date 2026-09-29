@@ -219,7 +219,23 @@ export async function POST(request: NextRequest) {
           forcedId && !Number.isNaN(forcedId) ? forcedId : null,
           ws
         );
-        return NextResponse.json({ ...result, workspace: ws });
+        const errList = Array.isArray((result as any).errors)
+          ? (result as any).errors
+          : [];
+        const errorMsg =
+          (result as any).error ||
+          (errList.length ? errList.slice(0, 5).join(" | ") : undefined);
+        const importedN = Number((result as any).imported) || 0;
+        const ok =
+          (result as any).success === true ||
+          importedN > 0 ||
+          errList.length === 0;
+        return NextResponse.json({
+          ...result,
+          success: ok,
+          error: ok ? undefined : errorMsg || "Sheets import failed",
+          workspace: ws,
+        });
       } catch (sheetErr: any) {
         return NextResponse.json(
           {
