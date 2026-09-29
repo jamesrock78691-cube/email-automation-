@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Restores page.tsx from known-good + critical auth patches for Live Sheet import.
+ * Restores page.tsx + force auth on Live Sheet import (no more fake Check .env).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -27,7 +27,19 @@ if (!text.includes("EmailAutomationDashboard")) {
   throw new Error("Downloaded page looks invalid");
 }
 
-// Critical: Live Google Sheet import must send login token
+// Force every /api/queue import call to use authHeaders()
+text = text.replace(
+  /fetch\(\s*["']\/api\/queue["']\s*,\s*\{\s*method:\s*["']POST["']\s*,\s*headers:\s*\{\s*["']Content-Type["']\s*:\s*["']application\/json["']\s*\}\s*,\s*body:\s*JSON\.stringify\(\s*\{[^}]*action:\s*["']import["']/g,
+  (m) => m.replace(
+    'headers: { "Content-Type": "application/json" }',
+    "headers: authHeaders()"
+  ).replace(
+    "headers: { 'Content-Type': 'application/json' }",
+    "headers: authHeaders()"
+  )
+);
+
+// Explicit known blocks
 text = patch(
   text,
   `      const res = await fetch("/api/queue", {
@@ -49,19 +61,23 @@ text = patch(
   "import live sheet authHeaders"
 );
 
+// Never show fake Check .env
+text = text.split('Live Google Sheet failed. Check .env').join(
+  "Live Google Sheet failed — dekh error message / login dobara"
+);
+
 text = patch(
   text,
-  `showError(data.error || "Live Google Sheet failed. Check .env");`,
+  `showError(data.error || "Live Google Sheet failed — dekh error message / login dobara");`,
   `showError(
           data.error ||
             (Array.isArray(data.errors) && data.errors.length
               ? data.errors.slice(0, 3).join(" | ")
-              : "Live Google Sheet failed")
+              : data.message || "Live Google Sheet failed")
         );`,
   "import real error"
 );
 
-// Other queue actions need auth
 for (const action of ["process_next", "process_batch", "reset_all", "clear_all"]) {
   text = patch(
     text,
@@ -110,11 +126,15 @@ text = patch(
   "campaign auth"
 );
 
-// Deduplicate accidental double headers
 text = text.replace(
   /headers:\s*\{\s*["']Content-Type["']\s*:\s*["']application\/json["']\s*\}\s*,\s*\n\s*headers:\s*authHeaders\(\)/g,
   "headers: authHeaders()"
 );
+
+if (text.includes("Check .env")) {
+  console.warn("WARN: Check .env still in page — stripped");
+  text = text.split("Check .env").join("see error details");
+}
 
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
 fs.writeFileSync(OUT, text);
