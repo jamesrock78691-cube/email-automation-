@@ -150,6 +150,7 @@ async function ensureCoreTables() {
         sent_at timestamp,
         open_count integer DEFAULT 0 NOT NULL,
         last_opened_at timestamp,
+        retry_after timestamp,
         workspace text DEFAULT 'main' NOT NULL,
         created_at timestamp DEFAULT now() NOT NULL
       )`,
@@ -187,13 +188,12 @@ export async function ensureWorkspaceColumns() {
     await addColumnSafe(client, "tracking_logs", "reference_no", "text");
     await addColumnSafe(client, "queue", "open_count", "integer DEFAULT 0");
     await addColumnSafe(client, "queue", "last_opened_at", "timestamp");
+    await addColumnSafe(client, "queue", "retry_after", "timestamp");
     await addColumnSafe(client, "gmail_accounts", "smtp_username", "text");
     await addColumnSafe(client, "gmail_accounts", "from_email", "text");
-    // Templates — required by drizzle schema / POST create
     await addColumnSafe(client, "templates", "body_text", "text DEFAULT ''");
     await addColumnSafe(client, "templates", "attachments_json", "text DEFAULT '[]'");
     await addColumnSafe(client, "templates", "attachment_path", "text");
-    // Settings — list_users / agent_stats
     await addColumnSafe(client, "settings", "created_at", "timestamp DEFAULT now()");
 
     const fills = [
@@ -230,7 +230,6 @@ export async function ensureWorkspaceColumns() {
       }
     }
 
-    // Verify templates body_text exists
     const tCheck = await client.query(
       `SELECT 1 FROM information_schema.columns
        WHERE table_schema = 'public' AND table_name = 'templates' AND column_name = 'body_text' LIMIT 1`
@@ -238,11 +237,10 @@ export async function ensureWorkspaceColumns() {
     if (!tCheck.rowCount) {
       throw new Error("FATAL: templates.body_text missing after ALTER");
     }
-    console.log("[DB] workspace + templates columns verified");
+    console.log("[DB] workspace + templates + queue.retry_after verified");
   });
 }
 
-/** Call from dashboard/queue/template before any query. */
 export async function forceQueueWorkspaceColumn() {
   await ensureCoreTables();
   await ensureWorkspaceColumns();
