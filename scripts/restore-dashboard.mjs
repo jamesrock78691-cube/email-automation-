@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Restore dashboard: camelCase fields, sent in run panel, working recentOpens. */
+/** Restore dashboard + working Live Tracking Pixel Opens for all workspaces. */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -66,10 +66,12 @@ function mapAccountRow(r: any) {
 
 `;
 
+// Simple opens query: logs by workspace OR queue open_count fallback
 const OPENS_BLOCK = `
     let recentOpens: any[] = [];
     try {
-      const ro = await pool.query(
+      // 1) Prefer tracking_logs for this workspace
+      let ro = await pool.query(
         \`SELECT
            tl.id,
            tl.opened_at,
@@ -86,17 +88,49 @@ const OPENS_BLOCK = `
            q.serial_no AS q_serial,
            q.mark_name AS q_mark,
            q.email AS q_email,
-           q.gmail_used_email AS q_gmail
+           q.gmail_used_email AS q_gmail,
+           q.open_count AS q_opens
          FROM tracking_logs tl
-         LEFT JOIN queue q
-           ON q.tracking_id = tl.tracking_id
-           OR (tl.queue_id IS NOT NULL AND q.id = tl.queue_id)
-         WHERE COALESCE(NULLIF(TRIM(tl.workspace), ''), q.workspace, 'main') = $1
-            OR q.workspace = $1
+         LEFT JOIN queue q ON q.tracking_id = tl.tracking_id
+         WHERE (
+           lower(coalesce(nullif(trim(tl.workspace), ''), 'main')) = lower($1)
+           OR lower(coalesce(q.workspace, '')) = lower($1)
+         )
          ORDER BY tl.opened_at DESC NULLS LAST
-         LIMIT 40\`,
+         LIMIT 50\`,
         [ws]
       );
+
+      // 2) If no logs, fall back to queue rows that were opened
+      if (!ro.rows?.length) {
+        ro = await pool.query(
+          \`SELECT
+             q.id,
+             q.last_opened_at AS opened_at,
+             NULL::text AS ip_address,
+             NULL::text AS user_agent,
+             NULL::text AS browser,
+             NULL::text AS device,
+             q.tracking_id,
+             q.id AS queue_id,
+             q.email AS log_email,
+             q.mark_name AS log_mark,
+             q.reference_no AS log_ref,
+             q.reference_no AS q_ref,
+             q.serial_no AS q_serial,
+             q.mark_name AS q_mark,
+             q.email AS q_email,
+             q.gmail_used_email AS q_gmail,
+             q.open_count AS q_opens
+           FROM queue q
+           WHERE lower(coalesce(q.workspace, 'main')) = lower($1)
+             AND coalesce(q.open_count, 0) > 0
+           ORDER BY q.last_opened_at DESC NULLS LAST, q.id DESC
+           LIMIT 50\`,
+          [ws]
+        );
+      }
+
       recentOpens = (ro.rows || []).map((op: any) => {
         const isManual = op.queue_id == null && !op.q_email;
         return {
@@ -113,6 +147,7 @@ const OPENS_BLOCK = `
           markName: op.q_mark || op.log_mark || (isManual ? "Manual Send" : "—"),
           email: op.q_email || op.log_email || "",
           serialNo: op.q_serial || "",
+          openCount: op.q_opens || 1,
           gmailUsedEmail: op.q_gmail || null,
           gmailUsedId: null as number | null,
         };
@@ -161,7 +196,6 @@ async function main() {
         recentQueueLogs = rq.rows;`
   );
 
-  // Replace broken drizzle recentOpens block with raw SQL
   const opensStart = text.indexOf("    let recentOpens: any[] = [];");
   const opensEnd = text.indexOf("    return NextResponse.json({");
   if (opensStart >= 0 && opensEnd > opensStart) {
@@ -179,6 +213,9 @@ async function main() {
 
   if (!text.includes("mapQueueRow") || !text.includes("gmailUsedEmail")) {
     throw new Error("dashboard patch failed");
+  }
+  if (!text.includes("fall back to queue rows")) {
+    console.warn("WARN: opens fallback text missing — check OPENS_BLOCK injection");
   }
 
   fs.mkdirSync(path.dirname(OUT), { recursive: true });
