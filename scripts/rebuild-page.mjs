@@ -4,6 +4,7 @@
  * - authHeaders on Run Panel + SMTP + Import
  * - normalize snake_case → camelCase for queue + SMTP display
  * - fix sentThisminute typo
+ * - Live Tracking Pixel Opens: full date + time
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -79,7 +80,7 @@ text = text.replace(
   'fetch("/api/gmail/verify", {\n      method: "POST",\n      headers: authHeaders()'
 );
 
-// ---- Normalize data on dashboard load (fixes empty Serial / SMTP limits) ----
+// ---- Normalize data on dashboard load ----
 text = patch(
   text,
   `setGmailAccounts(data.accounts || []);`,
@@ -123,6 +124,41 @@ text = patch(
   "normalize queue"
 );
 
+// Normalize recent opens + keep openedAt
+text = patch(
+  text,
+  `setRecentOpens(data.recentOpens || []);`,
+  `setRecentOpens((data.recentOpens || []).map((op: any) => ({
+          ...op,
+          openedAt: op.openedAt ?? op.opened_at ?? null,
+          referenceNo: op.referenceNo ?? op.reference_no ?? "",
+          markName: op.markName ?? op.mark_name ?? "",
+          serialNo: op.serialNo ?? op.serial_no ?? "",
+          email: op.email || "",
+          ipAddress: op.ipAddress ?? op.ip_address ?? "",
+          trackingId: op.trackingId ?? op.tracking_id ?? "",
+          gmailUsedEmail: op.gmailUsedEmail ?? op.gmail_used_email ?? null,
+        })));`,
+  "normalize recent opens"
+);
+
+// ---- Live Tracking Pixel Opens: full date + time ----
+text = patch(
+  text,
+  `{new Date(op.openedAt).toLocaleTimeString()}`,
+  `{op.openedAt
+                                ? new Date(op.openedAt).toLocaleString(undefined, {
+                                    year: "numeric",
+                                    month: "short",
+                                    day: "2-digit",
+                                    hour: "2-digit",
+                                    minute: "2-digit",
+                                    second: "2-digit",
+                                  })
+                                : "—"}`,
+  "opens date+time"
+);
+
 // ---- Display fallbacks + typo fix ----
 text = patch(text, "acc.sentThisminute", "(acc.sentThisMinute ?? acc.sentThisminute ?? acc.sent_this_minute ?? 0)", "sentThisMinute typo");
 text = patch(text, "{item.referenceNo}", '{item.referenceNo || item.reference_no || "—"}', "ref display");
@@ -143,10 +179,3 @@ text = text.split("Check .env").join("see error details");
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
 fs.writeFileSync(OUT, text);
 console.log("Wrote", OUT, text.length, "bytes");
-
-if (!text.includes("normalize accounts") && !text.includes("sentThisMinute: Number")) {
-  console.warn("WARN: account normalize may be missing");
-}
-if (!text.includes('serialNo || item.serial_no')) {
-  console.warn("WARN: serial fallback may be missing");
-}
