@@ -5,6 +5,7 @@
  * - normalize snake_case → camelCase for queue + SMTP display
  * - fix sentThisminute typo
  * - Live Tracking Pixel Opens: full date + time
+ * - Live sheet import: one-click loop until ALL rows imported
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -30,32 +31,37 @@ if (!text.includes("EmailAutomationDashboard")) {
   throw new Error("invalid page source");
 }
 
+// ---- One-click IMPORT ALL (keep calling until remaining=0) ----
+const OLD_LIVE_IMPORT = "  const handleImportFromLiveGoogleSheet = async () => {\n    try {\n      setLoading(true);\n      setErrorMsg(\"\");\n      setSuccessMsg(\"Google Sheet se import chal raha hai \u2014 wait karo, rukna nahi chahiye\u2026\");\n\n      const res = await fetch(\"/api/queue\", {\n        method: \"POST\",\n        headers: { \"Content-Type\": \"application/json\" },\n        body: JSON.stringify({\n  action: \"import\",\n  templateId: importTemplateId ? Number(importTemplateId) : null,\n}),\n      });\n\n      const data = await res.json();\n      if (data.success) {\n        showSuccess(\n          data.message ||\n            `Live Sheet: Imported ${data.imported ?? data.count ?? 0}, skipped ${data.skipped ?? 0}`\n        );\n        loadDashboardData();\n        setActiveTab(\"dashboard\");\n      } else {\n        showError(data.error || \"Live Google Sheet failed. Check .env\");\n      }\n    } catch (err: any) {\n      showError(err.message || \"Network error\");\n    } finally {\n      setLoading(false);\n    }\n  };";
+const NEW_LIVE_IMPORT = "  const handleImportFromLiveGoogleSheet = async () => {\n    try {\n      setLoading(true);\n      setErrorMsg(\"\");\n      setSuccessMsg(\"Google Sheet se saari rows import ho rahi hain \u2014 wait karo\u2026\");\n\n      let totalImported = 0;\n      let lastError = \"\";\n      let rounds = 0;\n      const MAX_ROUNDS = 80;\n\n      while (rounds < MAX_ROUNDS) {\n        rounds++;\n        setSuccessMsg(\n          `Import chal raha hai\u2026 ${totalImported} rows ho gayi (round ${rounds})`\n        );\n        const res = await fetch(\"/api/queue\", {\n          method: \"POST\",\n          headers: authHeaders(),\n          body: JSON.stringify({\n            action: \"import\",\n            templateId: importTemplateId ? Number(importTemplateId) : null,\n          }),\n        });\n        const data = await res.json();\n        if (!data.success) {\n          lastError =\n            data.error ||\n            (Array.isArray(data.errors) && data.errors.length\n              ? data.errors.slice(0, 3).join(\" | \")\n              : data.message) ||\n            \"Live Google Sheet failed\";\n          if (totalImported > 0) break;\n          showError(lastError);\n          return;\n        }\n        const n = Number(data.imported ?? data.count ?? 0) || 0;\n        totalImported += n;\n        const hasMore = data.hasMore === true || Number(data.remaining || 0) > 0;\n        if (n === 0) break;\n        if (!hasMore) break;\n      }\n\n      showSuccess(\n        `Live Sheet: Imported ${totalImported} rows` +\n          (lastError ? \" (phir ruk gaya: \" + lastError + \")\" : \"\")\n      );\n      loadDashboardData();\n      setActiveTab(\"dashboard\");\n    } catch (err: any) {\n      showError(err.message || \"Network error\");\n    } finally {\n      setLoading(false);\n    }\n  };";
+text = patch(text, OLD_LIVE_IMPORT, NEW_LIVE_IMPORT, "import-all loop");
+
 // ---- Auth on all queue actions (incl auto-run) ----
 for (const action of ["process_next", "process_batch", "reset_all", "clear_all"]) {
   text = patch(
     text,
-    `headers: { "Content-Type": "application/json" },\n            body: JSON.stringify({ action: "${action}" }),`,
-    `headers: authHeaders(),\n            body: JSON.stringify({ action: "${action}" }),`,
+    `headers: { \"Content-Type\": \"application/json\" },\\n            body: JSON.stringify({ action: \"${action}\" }),`,
+    `headers: authHeaders(),\\n            body: JSON.stringify({ action: \"${action}\" }),`,
     action + " auth12"
   );
   text = patch(
     text,
-    `headers: { "Content-Type": "application/json" },\n        body: JSON.stringify({ action: "${action}" }),`,
-    `headers: authHeaders(),\n        body: JSON.stringify({ action: "${action}" }),`,
+    `headers: { \"Content-Type\": \"application/json\" },\\n        body: JSON.stringify({ action: \"${action}\" }),`,
+    `headers: authHeaders(),\\n        body: JSON.stringify({ action: \"${action}\" }),`,
     action + " auth8"
   );
 }
 
 text = text.replace(
-  /fetch\(\s*["']\/api\/queue["']\s*,\s*\{\s*method:\s*["']POST["']\s*,\s*headers:\s*\{\s*["']Content-Type["']\s*:\s*["']application\/json["']\s*\}/g,
-  'fetch("/api/queue", {\n        method: "POST",\n        headers: authHeaders()'
+  /fetch\\(\\s*[\"']\\/api\\/queue[\"']\\s*,\\s*\\{\\s*method:\\s*[\"']POST[\"']\\s*,\\s*headers:\\s*\\{\\s*[\"']Content-Type[\"']\\s*:\\s*[\"']application\\/json[\"']\\s*\\}/g,
+  'fetch(\"/api/queue\", {\\n        method: \"POST\",\\n        headers: authHeaders()'
 );
 
 text = patch(
   text,
   `      const res = await fetch(url, {
         method,
-        headers: { "Content-Type": "application/json" },
+        headers: { \"Content-Type\": \"application/json\" },
         body: JSON.stringify(gmailForm),
       });`,
   `      const res = await fetch(url, {
@@ -67,31 +73,31 @@ text = patch(
 );
 text = patch(
   text,
-  `const res = await fetch(\`/api/gmail?id=\${id}\`, { method: "DELETE" });`,
-  `const res = await fetch(\`/api/gmail?id=\${id}\`, { method: "DELETE", headers: authHeaders() });`,
+  `const res = await fetch(\\/api/gmail?id=\\${id}\/, { method: \"DELETE\" });`.replace('\\/','`').replace('\\/','`'),
+  `const res = await fetch(\\/api/gmail?id=\\${id}\/, { method: \"DELETE\", headers: authHeaders() });`.replace('\\/','`').replace('\\/','`'),
   "gmail delete"
 );
+
 text = text.replace(
-  /fetch\(\s*["']\/api\/gmail\/test["']\s*,\s*\{\s*method:\s*["']POST["']\s*,\s*headers:\s*\{\s*["']Content-Type["']\s*:\s*["']application\/json["']\s*\}/g,
-  'fetch("/api/gmail/test", {\n      method: "POST",\n      headers: authHeaders()'
+  /fetch\\(\\s*[\"']\\/api\\/gmail\\/test[\"']\\s*,\\s*\\{\\s*method:\\s*[\"']POST[\"']\\s*,\\s*headers:\\s*\\{\\s*[\"']Content-Type[\"']\\s*:\\s*[\"']application\\/json[\"']\\s*\\}/g,
+  'fetch(\"/api/gmail/test\", {\\n      method: \"POST\",\\n      headers: authHeaders()'
 );
 text = text.replace(
-  /fetch\(\s*["']\/api\/gmail\/verify["']\s*,\s*\{\s*method:\s*["']POST["']\s*,\s*headers:\s*\{\s*["']Content-Type["']\s*:\s*["']application\/json["']\s*\}/g,
-  'fetch("/api/gmail/verify", {\n      method: "POST",\n      headers: authHeaders()'
+  /fetch\\(\\s*[\"']\\/api\\/gmail\\/verify[\"']\\s*,\\s*\\{\\s*method:\\s*[\"']POST[\"']\\s*,\\s*headers:\\s*\\{\\s*[\"']Content-Type[\"']\\s*:\\s*[\"']application\\/json[\"']\\s*\\}/g,
+  'fetch(\"/api/gmail/verify\", {\\n      method: \"POST\",\\n      headers: authHeaders()'
 );
 
-// ---- Normalize data on dashboard load ----
 text = patch(
   text,
   `setGmailAccounts(data.accounts || []);`,
   `setGmailAccounts((data.accounts || []).map((a: any) => ({
           ...a,
-          smtpUsername: a.smtpUsername ?? a.smtp_username ?? "",
-          fromEmail: a.fromEmail ?? a.from_email ?? a.email ?? "",
-          senderName: a.senderName ?? a.sender_name ?? "",
-          replyToEmail: a.replyToEmail ?? a.reply_to_email ?? "",
-          appPassword: a.appPassword ?? a.app_password ?? "",
-          smtpHost: a.smtpHost ?? a.smtp_host ?? "",
+          smtpUsername: a.smtpUsername ?? a.smtp_username ?? \"\",
+          fromEmail: a.fromEmail ?? a.from_email ?? a.email ?? \"\",
+          senderName: a.senderName ?? a.sender_name ?? \"\",
+          replyToEmail: a.replyToEmail ?? a.reply_to_email ?? \"\",
+          appPassword: a.appPassword ?? a.app_password ?? \"\",
+          smtpHost: a.smtpHost ?? a.smtp_host ?? \"\",
           smtpPort: Number(a.smtpPort ?? a.smtp_port ?? 465),
           dailyLimit: Number(a.dailyLimit ?? a.daily_limit ?? 500),
           minuteLimit: Number(a.minuteLimit ?? a.minute_limit ?? 50),
@@ -110,11 +116,11 @@ text = patch(
   `setQueueItems(data.recentQueue || []);`,
   `setQueueItems((data.recentQueue || []).map((q: any) => ({
           ...q,
-          referenceNo: q.referenceNo ?? q.reference_no ?? "",
-          serialNo: q.serialNo ?? q.serial_no ?? "",
-          markName: q.markName ?? q.mark_name ?? "",
-          filingDate: q.filingDate ?? q.filing_date ?? "",
-          trackingId: q.trackingId ?? q.tracking_id ?? "",
+          referenceNo: q.referenceNo ?? q.reference_no ?? \"\",
+          serialNo: q.serialNo ?? q.serial_no ?? \"\",
+          markName: q.markName ?? q.mark_name ?? \"\",
+          filingDate: q.filingDate ?? q.filing_date ?? \"\",
+          trackingId: q.trackingId ?? q.tracking_id ?? \"\",
           gmailUsedEmail: q.gmailUsedEmail ?? q.gmail_used_email ?? null,
           gmailUsedId: q.gmailUsedId ?? q.gmail_used_id ?? null,
           openCount: Number(q.openCount ?? q.open_count ?? 0),
@@ -124,58 +130,58 @@ text = patch(
   "normalize queue"
 );
 
-// Normalize recent opens + keep openedAt
 text = patch(
   text,
   `setRecentOpens(data.recentOpens || []);`,
   `setRecentOpens((data.recentOpens || []).map((op: any) => ({
           ...op,
           openedAt: op.openedAt ?? op.opened_at ?? null,
-          referenceNo: op.referenceNo ?? op.reference_no ?? "",
-          markName: op.markName ?? op.mark_name ?? "",
-          serialNo: op.serialNo ?? op.serial_no ?? "",
-          email: op.email || "",
-          ipAddress: op.ipAddress ?? op.ip_address ?? "",
-          trackingId: op.trackingId ?? op.tracking_id ?? "",
+          referenceNo: op.referenceNo ?? op.reference_no ?? \"\",
+          markName: op.markName ?? op.mark_name ?? \"\",
+          serialNo: op.serialNo ?? op.serial_no ?? \"\",
+          email: op.email || \"\",
+          ipAddress: op.ipAddress ?? op.ip_address ?? \"\",
+          trackingId: op.trackingId ?? op.tracking_id ?? \"\",
           gmailUsedEmail: op.gmailUsedEmail ?? op.gmail_used_email ?? null,
         })));`,
   "normalize recent opens"
 );
 
-// ---- Live Tracking Pixel Opens: full date + time ----
 text = patch(
   text,
   `{new Date(op.openedAt).toLocaleTimeString()}`,
   `{op.openedAt
                                 ? new Date(op.openedAt).toLocaleString(undefined, {
-                                    year: "numeric",
-                                    month: "short",
-                                    day: "2-digit",
-                                    hour: "2-digit",
-                                    minute: "2-digit",
-                                    second: "2-digit",
+                                    year: \"numeric\",
+                                    month: \"short\",
+                                    day: \"2-digit\",
+                                    hour: \"2-digit\",
+                                    minute: \"2-digit\",
+                                    second: \"2-digit\",
                                   })
-                                : "—"}`,
+                                : \"\u2014\"}`,
   "opens date+time"
 );
 
-// ---- Display fallbacks + typo fix ----
-text = patch(text, "acc.sentThisminute", "(acc.sentThisMinute ?? acc.sentThisminute ?? acc.sent_this_minute ?? 0)", "sentThisMinute typo");
-text = patch(text, "{item.referenceNo}", '{item.referenceNo || item.reference_no || "—"}', "ref display");
-text = patch(text, "{item.markName}", '{item.markName || item.mark_name || "—"}', "mark display");
-text = patch(text, "{item.filingDate}", '{item.filingDate || item.filing_date || "—"}', "filing display");
-text = patch(text, "Serial: #{item.serialNo}", 'Serial: #{item.serialNo || item.serial_no || "—"}', "serial display");
-text = patch(text, "{item.gmailUsedEmail ? (", "{(item.gmailUsedEmail || item.gmail_used_email) ? (", "gmail cond");
-text = patch(text, "{item.gmailUsedEmail}", "{item.gmailUsedEmail || item.gmail_used_email}", "gmail display");
-text = patch(text, "{acc.smtpHost}:{acc.smtpPort}", '{acc.smtpHost || acc.smtp_host || "—"}:{acc.smtpPort || acc.smtp_port || "—"}', "host port");
-text = patch(text, "Daily: {acc.dailyLimit} / M {acc.minuteLimit}", "Daily: {acc.dailyLimit ?? acc.daily_limit ?? 0} / M {acc.minuteLimit ?? acc.minute_limit ?? 0}", "limits");
-text = patch(text, "{acc.sentToday}", "{acc.sentToday ?? acc.sent_today ?? 0}", "sentToday");
-text = patch(text, "{acc.fromEmail || acc.email}", "{acc.fromEmail || acc.from_email || acc.email}", "fromEmail");
-text = patch(text, "Level {acc.priority}", "Level {acc.priority ?? 1}", "priority");
+text = patch(text, \"acc.sentThisminute\", \"(acc.sentThisMinute ?? acc.sentThisminute ?? acc.sent_this_minute ?? 0)\", \"sentThisMinute typo\");
+text = patch(text, \"{item.referenceNo}\", '{item.referenceNo || item.reference_no || \"\u2014\"}', \"ref display\");
+text = patch(text, \"{item.markName}\", '{item.markName || item.mark_name || \"\u2014\"}', \"mark display\");
+text = patch(text, \"{item.filingDate}\", '{item.filingDate || item.filing_date || \"\u2014\"}', \"filing display\");
+text = patch(text, \"Serial: #{item.serialNo}\", 'Serial: #{item.serialNo || item.serial_no || \"\u2014\"}', \"serial display\");
+text = patch(text, \"{item.gmailUsedEmail ? (\", \"{(item.gmailUsedEmail || item.gmail_used_email) ? (\", \"gmail cond\");
+text = patch(text, \"{item.gmailUsedEmail}\", \"{item.gmailUsedEmail || item.gmail_used_email}\", \"gmail display\");
+text = patch(text, \"{acc.smtpHost}:{acc.smtpPort}\", '{acc.smtpHost || acc.smtp_host || \"\u2014\"}:{acc.smtpPort || acc.smtp_port || \"\u2014\"}', \"host port\");
+text = patch(text, \"Daily: {acc.dailyLimit} / M {acc.minuteLimit}\", \"Daily: {acc.dailyLimit ?? acc.daily_limit ?? 0} / M {acc.minuteLimit ?? acc.minute_limit ?? 0}\", \"limits\");
+text = patch(text, \"{acc.sentToday}\", \"{acc.sentToday ?? acc.sent_today ?? 0}\", \"sentToday\");
+text = patch(text, \"{acc.fromEmail || acc.email}\", \"{acc.fromEmail || acc.from_email || acc.email}\", \"fromEmail\");
+text = patch(text, \"Level {acc.priority}\", \"Level {acc.priority ?? 1}\", \"priority\");
 
-text = text.split("Live Google Sheet failed. Check .env").join("Live Google Sheet failed");
-text = text.split("Check .env").join("see error details");
+text = text.split(\"Live Google Sheet failed. Check .env\").join(\"Live Google Sheet failed\");
+text = text.split(\"Check .env\").join(\"see error details\");
 
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
 fs.writeFileSync(OUT, text);
-console.log("Wrote", OUT, text.length, "bytes");
+console.log(\"Wrote\", OUT, text.length, \"bytes\");
+if (!text.includes(\"MAX_ROUNDS\")) {
+  console.warn(\"WARN: import-all loop missing\");
+}
