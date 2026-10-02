@@ -38,6 +38,7 @@ async function main() {
         console.error("queue openCount update failed:", e);
       }`;
 
+  // Fallback uses typed openCount only (TS rejects open_count on drizzle row)
   const neu = `      try {
         await db.execute(
           sql\`UPDATE queue
@@ -51,7 +52,7 @@ async function main() {
           await db
             .update(queue)
             .set({
-              openCount: (qItem.openCount || qItem.open_count || 0) + 1,
+              openCount: (qItem.openCount || 0) + 1,
               lastOpenedAt: openedAt,
             })
             .where(eq(queue.id, qItem.id));
@@ -64,7 +65,12 @@ async function main() {
     text = text.replace(old, neu);
     console.log("restore-track: atomic open_count applied");
   } else if (text.includes("coalesce(open_count")) {
-    console.log("restore-track: atomic already present");
+    // Fix any previous bad open_count access that broke tsc
+    text = text.replace(
+      /openCount:\s*\(qItem\.openCount\s*\|\|\s*qItem\.open_count\s*\|\|\s*0\)\s*\+\s*1/g,
+      "openCount: (qItem.openCount || 0) + 1"
+    );
+    console.log("restore-track: atomic already present; cleaned open_count TS access");
   } else {
     console.warn("restore-track: openCount block pattern not found — writing source as-is");
   }
