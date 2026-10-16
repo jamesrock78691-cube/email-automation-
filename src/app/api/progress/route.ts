@@ -194,35 +194,34 @@ export async function GET(req: NextRequest) {
       ? people.filter((p) => p.visibleToManager)
       : people;
 
+    // Agent-stats sum (after system was built)
     let totalToday = shown.reduce((s, p) => s + (p.sentToday || 0), 0);
     let totalMonth = shown.reduce((s, p) => s + (p.sentMonth || 0), 0);
 
-    // Super admin: queue counts (auto + manual) so month/today are complete
-    if (isSuperAdmin(session)) {
-      try {
-        const q = await pool.query(
-          `SELECT
-             COUNT(*) FILTER (
-               WHERE timezone('America/Los_Angeles', COALESCE(sent_at, created_at))::date
-                 = timezone('America/Los_Angeles', now())::date
-             )::int AS today_cnt,
-             COUNT(*) FILTER (
-               WHERE date_trunc('month', timezone('America/Los_Angeles', COALESCE(sent_at, created_at)))
-                 = date_trunc('month', timezone('America/Los_Angeles', now()))
-             )::int AS month_cnt
-           FROM queue
-           WHERE lower(COALESCE(status, '')) IN ('sent', 'done', 'success')`
-        );
-        const row = q.rows?.[0];
-        if (row) {
-          const qt = Number(row.today_cnt || 0) || 0;
-          const qm = Number(row.month_cnt || 0) || 0;
-          if (qt > totalToday) totalToday = qt;
-          if (qm > totalMonth) totalMonth = qm;
-        }
-      } catch (e) {
-        console.error("progress queue totals:", e);
+    // Queue is source of truth for historical sends (before progress system + auto + manual)
+    try {
+      const q = await pool.query(
+        `SELECT
+           COUNT(*) FILTER (
+             WHERE timezone('America/Los_Angeles', COALESCE(sent_at, created_at))::date
+               = timezone('America/Los_Angeles', now())::date
+           )::int AS today_cnt,
+           COUNT(*) FILTER (
+             WHERE date_trunc('month', timezone('America/Los_Angeles', COALESCE(sent_at, created_at)))
+               = date_trunc('month', timezone('America/Los_Angeles', now()))
+           )::int AS month_cnt
+         FROM queue
+         WHERE lower(COALESCE(status, '')) IN ('sent', 'done', 'success')`
+      );
+      const row = q.rows?.[0];
+      if (row) {
+        const qt = Number(row.today_cnt || 0) || 0;
+        const qm = Number(row.month_cnt || 0) || 0;
+        if (qt > totalToday) totalToday = qt;
+        if (qm > totalMonth) totalMonth = qm;
       }
+    } catch (e) {
+      console.error("progress queue totals:", e);
     }
 
     if (totalMonth < totalToday) totalMonth = totalToday;
