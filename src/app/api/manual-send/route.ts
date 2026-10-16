@@ -16,7 +16,80 @@ import {
   workspaceFromRequest,
   workspaceSql,
   settingKey,
+  MAIN_WORKSPACE,
 } from "@/lib/workspace";
+
+/** America/Los_Angeles (PST/PDT) calendar day + month keys */
+function pstKeys(d = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value || "00";
+  const y = get("year");
+  const m = get("month");
+  const day = get("day");
+  return { dayKey: `${y}-${m}-${day}`, monthKey: `${y}-${m}` };
+}
+
+async function bumpAgentStats(
+  ws: string,
+  userId: number | string | null | undefined,
+  username: string
+) {
+  try {
+    if (!userId && !username) return;
+    const key = String(userId || username);
+    const mapKey = settingKey("agent_stats", ws || MAIN_WORKSPACE);
+    const rows = await db
+      .select()
+      .from(settings)
+      .where(eq(settings.key, mapKey))
+      .limit(1);
+    const map = rows.length ? JSON.parse(rows[0].value || "{}") : {};
+    const { dayKey, monthKey } = pstKeys();
+    const cur = map[key] || {
+      totalSent: 0,
+      sentToday: 0,
+      sentMonth: 0,
+      dailyLimit: 100,
+      lastDate: dayKey,
+      lastMonth: monthKey,
+      username: username || "",
+    };
+    if (cur.lastDate !== dayKey) {
+      cur.sentToday = 0;
+      cur.lastDate = dayKey;
+    }
+    if (cur.lastMonth !== monthKey) {
+      cur.sentMonth = 0;
+      cur.lastMonth = monthKey;
+    }
+    cur.totalSent = (cur.totalSent || 0) + 1;
+    cur.sentToday = (cur.sentToday || 0) + 1;
+    cur.sentMonth = (cur.sentMonth || 0) + 1;
+    if (username) cur.username = username;
+    map[key] = cur;
+    const str = JSON.stringify(map);
+    if (rows.length) {
+      await db.update(settings).set({ value: str }).where(eq(settings.key, mapKey));
+    } else {
+      await db.insert(settings).values({ key: mapKey, value: str });
+    }
+  } catch (e) {
+    console.error("bumpAgentStats failed:", e);
+  }
+}
+
+function isHealthy(acc: any, now: Date) {
+  if (String(acc.status || "").toLowerCase() === "disabled") return false;
+  if (acc.cooldownUntil && new Date(acc.cooldownUntil) > now) return false;
+  if ((acc.sentToday || 0) >= (acc.dailyLimit || 500)) return false;
+  if ((acc.sentThisMinute || 0) >= (acc.minuteLimit || 50)) return false;
+  return true;
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -50,51 +123,43 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    let account: any = null;
-    if (smtpAccountId) {
-      const rows = await db
-        .select()
-        .from(gmailAccounts)
-        .where(
-          and(
-            eq(gmailAccounts.id, Number(smtpAccountId)),
-            workspaceSql(gmailAccounts.workspace, ws)
-          )
+    const allAccounts = await db
+      .select()
+      .from(gmailAccounts)
+      .where(
+        and(
+          eq(gmailAccounts.status, "enabled"),
+          workspaceSql(gmailAccounts.workspace, ws)
         )
-        .limit(1);
-      account = rows[0] || null;
-    }
+      )
+      .orderBy(desc(gmailAccounts.priority));
 
-    if (!account) {
-      const accounts = await db
-        .select()
-        .from(gmailAccounts)
-        .where(
-          and(
-            eq(gmailAccounts.status, "enabled"),
-            workspaceSql(gmailAccounts.workspace, ws)
-          )
-        )
-        .orderBy(desc(gmailAccounts.priority));
-
-      const now = new Date();
-      for (const acc of accounts) {
-        if (shouldResetDailyQuota(acc.lastUsedAt)) {
-          await db
-            .update(gmailAccounts)
-            .set({ sentToday: 0, sentThisMinute: 0 })
-            .where(eq(gmailAccounts.id, acc.id));
-          acc.sentToday = 0;
-          acc.sentThisMinute = 0;
-        }
-        if (acc.cooldownUntil && new Date(acc.cooldownUntil) > now) continue;
-        if ((acc.sentToday || 0) >= (acc.dailyLimit || 500)) continue;
-        account = acc;
-        break;
+    const now = new Date();
+    for (const acc of allAccounts) {
+      if (shouldResetDailyQuota(acc.lastUsedAt)) {
+        await db
+          .update(gmailAccounts)
+          .set({ sentToday: 0, sentThisMinute: 0 })
+          .where(eq(gmailAccounts.id, acc.id));
+        acc.sentToday = 0;
+        acc.sentThisMinute = 0;
       }
     }
 
-    if (!account) {
+    const ordered: any[] = [];
+    const preferredId = smtpAccountId ? Number(smtpAccountId) : 0;
+    if (preferredId) {
+      const pref = allAccounts.find((a) => a.id === preferredId);
+      if (pref) ordered.push(pref);
+    }
+    for (const a of allAccounts) {
+      if (!ordered.some((x) => x.id === a.id)) ordered.push(a);
+    }
+
+    const candidates = ordered.filter((a) => isHealthy(a, now));
+    const tryList = candidates.length ? candidates : ordered;
+
+    if (!tryList.length) {
       return NextResponse.json(
         {
           success: false,
@@ -105,30 +170,69 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const transporter = createSmtpTransport(account);
-
-    const displayFrom = fromEmail || smtpFromAddress(account);
-    const displayName = fromName || account.senderName || account.email;
     const trackingId = randomUUID();
     const pixelBase = getAppBaseUrl(request);
     const pixel = buildTrackingPixelHtml(pixelBase, trackingId, to);
     const htmlWithPixel = injectTrackingPixel(emailHtml, pixel);
-    console.log(
-      `[MANUAL SEND] ws=${ws} trackingId=${trackingId} pixelBase=${pixelBase}`
-    );
 
-    await transporter.sendMail({
-      from: `"${displayName}" <${displayFrom}>`,
-      replyTo: replyTo || account.replyToEmail || displayFrom,
-      to,
-      cc: cc || undefined,
-      bcc: bcc || undefined,
-      subject,
-      html: htmlWithPixel,
-    });
+    let account: any = null;
+    let lastError: any = null;
+    const tried: string[] = [];
+
+    for (const acc of tryList) {
+      tried.push(acc.email || String(acc.id));
+      try {
+        const transporter = createSmtpTransport(acc);
+        const displayFrom = fromEmail || smtpFromAddress(acc);
+        const displayName = fromName || acc.senderName || acc.email;
+        await transporter.sendMail({
+          from: `"${displayName}" <${displayFrom}>`,
+          replyTo: replyTo || acc.replyToEmail || displayFrom,
+          to,
+          cc: cc || undefined,
+          bcc: bcc || undefined,
+          subject,
+          html: htmlWithPixel,
+        });
+        account = acc;
+        lastError = null;
+        break;
+      } catch (err: any) {
+        lastError = err;
+        console.error(
+          `[MANUAL SEND] SMTP fail ws=${ws} account=${acc.email}:`,
+          err?.message || err
+        );
+        try {
+          const cool = new Date();
+          cool.setMinutes(cool.getMinutes() + 2);
+          await db
+            .update(gmailAccounts)
+            .set({
+              cooldownUntil: cool,
+              errorCount: (acc.errorCount || 0) + 1,
+              lastUsedAt: new Date(),
+            })
+            .where(eq(gmailAccounts.id, acc.id));
+        } catch {}
+      }
+    }
+
+    if (!account) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            lastError?.message ||
+            "All SMTP accounts failed. Tried: " + tried.join(", "),
+          tried,
+        },
+        { status: 500 }
+      );
+    }
 
     const cooldownUntil = new Date();
-    cooldownUntil.setSeconds(cooldownUntil.getSeconds() + 20);
+    cooldownUntil.setSeconds(cooldownUntil.getSeconds() + 15);
 
     await db
       .update(gmailAccounts)
@@ -141,6 +245,8 @@ export async function POST(request: NextRequest) {
       })
       .where(eq(gmailAccounts.id, account.id));
 
+    await bumpAgentStats(ws, sentByUserId, sentByUsername || "");
+
     try {
       const mapKey = settingKey("manual_track_map", ws);
       const mapRows = await db
@@ -148,9 +254,7 @@ export async function POST(request: NextRequest) {
         .from(settings)
         .where(eq(settings.key, mapKey))
         .limit(1);
-      const map = mapRows.length
-        ? JSON.parse(mapRows[0].value || "{}")
-        : {};
+      const map = mapRows.length ? JSON.parse(mapRows[0].value || "{}") : {};
       map[trackingId] = {
         email: to,
         subject: subject || "",
@@ -207,6 +311,7 @@ export async function POST(request: NextRequest) {
       usedAccount: account.email,
       trackingId,
       workspace: ws,
+      tried,
       htmlLength: htmlWithPixel.length,
     });
   } catch (error: any) {
