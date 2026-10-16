@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 /**
- * Manager read-only progress panel.
- * Hooks MUST be injected BEFORE any early returns (authChecked / authUser)
- * or React will crash the login page.
+ * Manager read-only progress panel + Super Admin visibility settings.
+ * Hooks MUST be before any early returns (authChecked / authUser).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -21,15 +20,30 @@ if (!fs.existsSync(FILE)) {
 }
 let text = fs.readFileSync(FILE, "utf8");
 
-// Strip previous broken injection if present
+if (text.includes("Manager can see") && text.includes("saveManagerVisibility") && text.includes("isManagerOnly")) {
+  console.log("patch-manager-page: already has visibility UI");
+  process.exit(0);
+}
+
 if (text.includes("isManagerOnly") || text.includes("Team Progress")) {
   const start = text.indexOf("const isManagerOnly");
   if (start >= 0) {
     let end = text.indexOf("// Login screen", start);
     if (end < 0) end = text.indexOf("if (!authUser) {", start);
-    if (end > start) {
+    const chk = text.indexOf("if (!authChecked)");
+    if (start > chk && end > start) {
       text = text.slice(0, start) + text.slice(end);
-      console.log("patch-manager-page: stripped previous manager injection");
+      console.log("patch-manager-page: stripped broken early-return injection");
+    }
+  }
+  if (text.includes("Team Progress") && text.indexOf("Team Progress") > text.indexOf("if (!authChecked)")) {
+    const tp = text.indexOf("if (isManagerOnly)");
+    if (tp > 0) {
+      const end = text.indexOf("// Login screen", tp);
+      if (end > tp) {
+        text = text.slice(0, tp) + text.slice(end);
+        console.log("patch-manager-page: stripped old manager view");
+      }
     }
   }
 }
@@ -37,10 +51,11 @@ if (text.includes("isManagerOnly") || text.includes("Team Progress")) {
 function patch(oldStr, newStr, label) {
   if (!text.includes(oldStr)) {
     console.log("Skip:", label);
-    return;
+    return false;
   }
   text = text.split(oldStr).join(newStr);
   console.log("Patched:", label);
+  return true;
 }
 
 patch(
@@ -56,9 +71,13 @@ patch(
 
 const HOOKS = `
   const isManagerOnly = !!authUser && (String(authUser.role || "").toLowerCase() === "manager" || String(authUser.username || "").toLowerCase() === "manager");
+  const isSuperAdminUser = !!authUser && (String(authUser.role || "").toLowerCase() === "super_admin" || String(authUser.role || "").toLowerCase() === "superadmin" || ["admin","superadmin"].includes(String(authUser.username || "").toLowerCase()));
   const [managerPeople, setManagerPeople] = useState<any[]>([]);
+  const [managerAllPeople, setManagerAllPeople] = useState<any[]>([]);
+  const [managerVisibleIds, setManagerVisibleIds] = useState<number[]>([]);
   const [managerTotals, setManagerTotals] = useState({ totalToday: 0, totalMonth: 0, dayKey: "", monthKey: "" });
   const [managerLoading, setManagerLoading] = useState(false);
+  const [managerSaveMsg, setManagerSaveMsg] = useState("");
 `;
 
 if (!text.includes("isManagerOnly")) {
@@ -74,9 +93,7 @@ if (!text.includes("isManagerOnly")) {
     const a3 = "const [authChecked, setAuthChecked] = useState(false);";
     if (text.includes(a3)) {
       text = text.replace(a3, a3 + "\n" + HOOKS);
-      console.log("hooks after authChecked");
-    } else {
-      console.warn("no hooks anchor");
+      console.log("hooks after authChecked state");
     }
   }
 }
@@ -89,6 +106,12 @@ const EFFECT = `
       const data = await res.json();
       if (data.success) {
         setManagerPeople(data.people || []);
+        setManagerAllPeople(data.allPeople || data.people || []);
+        setManagerVisibleIds(
+          Array.isArray(data.visibleUserIds)
+            ? data.visibleUserIds.map((x: any) => Number(x))
+            : (data.allPeople || data.people || []).map((p: any) => Number(p.id))
+        );
         setManagerTotals({
           totalToday: data.totalToday || 0,
           totalMonth: data.totalMonth || 0,
@@ -99,12 +122,31 @@ const EFFECT = `
     } catch {}
     finally { setManagerLoading(false); }
   };
+  const saveManagerVisibility = async () => {
+    try {
+      setManagerSaveMsg("");
+      const res = await fetch("/api/progress", {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "set_visible", userIds: managerVisibleIds }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setManagerSaveMsg("Saved — manager will only see selected people.");
+        await loadManagerProgress();
+      } else {
+        setManagerSaveMsg(data.error || "Save failed");
+      }
+    } catch (e: any) {
+      setManagerSaveMsg(e?.message || "Save failed");
+    }
+  };
   useEffect(() => {
-    if (!isManagerOnly) return;
+    if (!isManagerOnly && !isSuperAdminUser) return;
     loadManagerProgress();
     const id = setInterval(loadManagerProgress, 30000);
     return () => clearInterval(id);
-  }, [isManagerOnly]);
+  }, [isManagerOnly, isSuperAdminUser]);
 `;
 
 if (!text.includes("loadManagerProgress")) {
@@ -113,7 +155,7 @@ if (!text.includes("loadManagerProgress")) {
     console.log("effect before Loading auth");
   } else if (text.includes("if (!authChecked)")) {
     text = text.replace("if (!authChecked)", EFFECT + "\n  if (!authChecked)");
-    console.log("effect before authChecked return");
+    console.log("effect before authChecked");
   }
 }
 
@@ -184,11 +226,93 @@ if (!text.includes("Team Progress")) {
   if (text.includes("// Login screen")) {
     text = text.replace("// Login screen", VIEW + "  // Login screen");
     console.log("manager view before Login screen");
-  } else if (text.includes("if (!authUser) {")) {
+  }
+}
+
+const ADMIN_PANEL = `
+        {/* Manager Progress Visibility — Super Admin only */}
+        {isSuperAdminUser && (
+          <section className="rounded-2xl border border-indigo-800/50 bg-slate-950/60 p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-bold text-white">Manager Progress Visibility</h2>
+                <p className="text-xs text-slate-400">Choose who the manager account can see. Totals use PST (day 00:00 · month from 1st).</p>
+              </div>
+              <div className="flex gap-2">
+                <button type="button" onClick={loadManagerProgress} className="px-3 py-1.5 rounded-lg bg-slate-800 text-xs border border-slate-700">Refresh</button>
+                <button type="button" onClick={saveManagerVisibility} className="px-3 py-1.5 rounded-lg bg-indigo-600 text-xs font-semibold">Save visibility</button>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="rounded-xl border border-slate-800 p-3">
+                <p className="text-[10px] uppercase text-slate-500">Total Today</p>
+                <p className="text-2xl font-bold text-emerald-400">{managerTotals.totalToday}</p>
+              </div>
+              <div className="rounded-xl border border-slate-800 p-3">
+                <p className="text-[10px] uppercase text-slate-500">Total Month</p>
+                <p className="text-2xl font-bold text-blue-400">{managerTotals.totalMonth}</p>
+              </div>
+              <div className="rounded-xl border border-slate-800 p-3">
+                <p className="text-[10px] uppercase text-slate-500">PST Day</p>
+                <p className="text-sm font-semibold text-slate-200">{managerTotals.dayKey || "—"}</p>
+              </div>
+              <div className="rounded-xl border border-slate-800 p-3">
+                <p className="text-[10px] uppercase text-slate-500">PST Month</p>
+                <p className="text-sm font-semibold text-slate-200">{managerTotals.monthKey || "—"}</p>
+              </div>
+            </div>
+            {managerSaveMsg && <p className="text-xs text-indigo-300">{managerSaveMsg}</p>}
+            <div className="overflow-x-auto rounded-xl border border-slate-800">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-900 text-slate-400 text-left">
+                  <tr>
+                    <th className="p-2">Manager can see</th>
+                    <th className="p-2">Name</th>
+                    <th className="p-2">Role</th>
+                    <th className="p-2">Workspace</th>
+                    <th className="p-2 text-right">Today</th>
+                    <th className="p-2 text-right">Month</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(managerAllPeople.length ? managerAllPeople : managerPeople).map((p: any) => {
+                    const id = Number(p.id);
+                    const checked = managerVisibleIds.includes(id);
+                    return (
+                      <tr key={String(id) + p.username} className="border-t border-slate-800/80">
+                        <td className="p-2">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) => {
+                              if (e.target.checked) setManagerVisibleIds((prev) => Array.from(new Set([...prev, id])));
+                              else setManagerVisibleIds((prev) => prev.filter((x) => x !== id));
+                            }}
+                          />
+                        </td>
+                        <td className="p-2 font-medium">{p.username}</td>
+                        <td className="p-2 text-slate-400">{p.role}</td>
+                        <td className="p-2 text-slate-400">{p.workspace}</td>
+                        <td className="p-2 text-right text-emerald-400 font-semibold">{p.sentToday}</td>
+                        <td className="p-2 text-right text-blue-400 font-semibold">{p.sentMonth}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
+`;
+
+if (!text.includes("Manager Progress Visibility")) {
+  if (text.includes("{/* Global Stats Grid — Super Admin / Admin only */}")) {
     text = text.replace(
-      "// Login screen — separate Admin/Super Admin vs Operator panels\n  if (!authUser) {",
-      VIEW + "  // Login screen — separate Admin/Super Admin vs Operator panels\n  if (!authUser) {"
+      "{/* Global Stats Grid — Super Admin / Admin only */}",
+      ADMIN_PANEL + "        {/* Global Stats Grid — Super Admin / Admin only */}"
     );
+    console.log("super admin visibility panel injected");
   }
 }
 
@@ -210,7 +334,7 @@ if (text.includes(">Operator</button>") && !text.includes('setLoginPanel("manage
 }
 
 if (text.includes("const isManagerOnly") && text.indexOf("const isManagerOnly") > text.indexOf("if (!authChecked)")) {
-  console.error("FATAL: isManagerOnly still after authChecked return — hooks order broken");
+  console.error("FATAL: hooks after authChecked");
   process.exit(1);
 }
 
