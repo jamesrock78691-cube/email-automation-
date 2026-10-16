@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
  * After restore-auth: PST day/month stats, manager role, seed manager user.
+ * Safe normalizeRole replace (must not break const r declaration).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -23,6 +24,25 @@ if (!fs.existsSync(FILE)) {
 
 let t = fs.readFileSync(FILE, "utf8");
 
+const GOOD_NORM = `function normalizeRole(role: string | null | undefined): string {
+  if (!role) return "operator";
+  const r = String(role).toLowerCase().replace(/-/g, "_");
+  if (r === "superadmin" || r === "super_admin") return "super_admin";
+  if (r === "admin") return "admin";
+  if (r === "manager") return "manager";
+  return "operator";
+}`;
+
+// Match full function including ": string {" return type
+const NORM_RE = /function normalizeRole\([^)]*\)[^{]*\{[\s\S]*?\n\}/;
+
+if (NORM_RE.test(t)) {
+  t = t.replace(NORM_RE, GOOD_NORM);
+  console.log("patch-auth-manager: normalizeRole set (manager support)");
+} else {
+  console.warn("patch-auth-manager: normalizeRole not found");
+}
+
 if (!t.includes("function pstKeys")) {
   const helper = `
 function pstKeys(d: Date = new Date()) {
@@ -40,23 +60,19 @@ function pstKeys(d: Date = new Date()) {
 }
 
 `;
-  t = t.replace(
-    "export async function GET(req: NextRequest) {",
-    helper + "export async function GET(req: NextRequest) {"
-  );
-}
-
-t = t.replace(
-  /function normalizeRole\([^)]*\)[^{]*\{[\s\S]*?return "operator";\s*\}/,
-  (block) => {
-    if (block.includes('"manager"')) return block;
-    return block.replace(
-      'return "operator";',
-      `if (r === "manager") return "manager";
-  return "operator";`
+  if (t.includes("export async function GET(req: NextRequest) {")) {
+    t = t.replace(
+      "export async function GET(req: NextRequest) {",
+      helper + "export async function GET(req: NextRequest) {"
+    );
+  } else {
+    t = t.replace(
+      "export async function POST(req: NextRequest) {",
+      helper + "export async function POST(req: NextRequest) {"
     );
   }
-);
+  console.log("patch-auth-manager: pstKeys added");
+}
 
 const oldRecord = `      const today = new Date().toISOString().slice(0, 10);
       const cur = statsMap[key] || {
@@ -120,13 +136,16 @@ const newRecord = `      const { dayKey, monthKey } = pstKeys();
 if (t.includes(oldRecord)) {
   t = t.replace(oldRecord, newRecord);
   console.log("patch-auth-manager: record_send PST+month");
-} else if (t.includes("sentMonth")) {
+} else if (t.includes("sentMonth") && t.includes("pstKeys()")) {
   console.log("patch-auth-manager: sentMonth already present");
 } else {
   console.warn("patch-auth-manager: record_send pattern not found");
 }
 
-if (t.includes("for (const [username, role, workspace] of defaults)") && !t.includes('["manager"')) {
+if (
+  t.includes("for (const [username, role, workspace] of defaults)") &&
+  !t.includes('["manager"')
+) {
   t = t.replace(
     "for (const [username, role, workspace] of defaults)",
     `defaults.push(["manager", "manager", "main"] as any);
@@ -167,13 +186,24 @@ async function ensureManagerUser() {
       "await ensureSchemaReady();",
       "await ensureSchemaReady();\n    await ensureManagerUser();"
     );
-  } else {
+  } else if (t.includes("const body = await req.json();")) {
     t = t.replace(
       "const body = await req.json();",
       "await ensureManagerUser();\n    const body = await req.json();"
     );
   }
   console.log("patch-auth-manager: ensureManagerUser injected");
+}
+
+// Hard fail if still broken
+if (t.includes('if (!role) if (r === "manager")') || /const r = String\(role\)[\s\S]*if \(!role\) if \(r/.test(t)) {
+  t = t.replace(NORM_RE, GOOD_NORM);
+  console.log("patch-auth-manager: forced normalizeRole repair");
+}
+
+if (!t.includes('if (r === "manager") return "manager"')) {
+  console.error("patch-auth-manager: FATAL normalizeRole missing manager");
+  process.exit(1);
 }
 
 fs.writeFileSync(FILE, t);
