@@ -237,11 +237,11 @@ const TAB_BTN = `
           {isSuperAdminUser && (
             <button
               onClick={() => setActiveTab("team_progress")}
-              className={\`flex items-center gap-2 px-5 py-3 text-sm font-semibold border-b-2 transition \${
+              className={
                 activeTab === "team_progress"
-                  ? "border-indigo-500 text-indigo-400"
-                  : "border-transparent text-slate-400 hover:text-white"
-              \}`}
+                  ? "flex items-center gap-2 px-5 py-3 text-sm font-semibold border-b-2 transition border-indigo-500 text-indigo-400"
+                  : "flex items-center gap-2 px-5 py-3 text-sm font-semibold border-b-2 transition border-transparent text-slate-400 hover:text-white"
+              }
             >
               Team Progress
             </button>
