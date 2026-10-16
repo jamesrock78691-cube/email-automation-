@@ -23,19 +23,22 @@ function pstKeys(d = new Date()) {
   return { dayKey: `${y}-${m}-${day}`, monthKey: `${y}-${m}` };
 }
 
-async function loadStatsMap(ws: string): Promise<Record<string, any>> {
+async function loadJsonSetting(key: string, fallback: any = {}) {
   try {
-    const key = settingKey("agent_stats", ws);
     const rows = await db
       .select()
       .from(settings)
       .where(eq(settings.key, key))
       .limit(1);
-    if (!rows.length) return {};
-    return JSON.parse(rows[0].value || "{}") || {};
+    if (!rows.length) return fallback;
+    return JSON.parse(rows[0].value || JSON.stringify(fallback)) || fallback;
   } catch {
-    return {};
+    return fallback;
   }
+}
+
+async function loadStatsMap(ws: string): Promise<Record<string, any>> {
+  return loadJsonSetting(settingKey("agent_stats", ws), {});
 }
 
 async function loadVisibleIds(): Promise<number[] | null> {
@@ -47,9 +50,9 @@ async function loadVisibleIds(): Promise<number[] | null> {
       .where(eq(settings.key, key))
       .limit(1);
     if (!rows.length) return null;
-    const arr = JSON.parse(rows[0].value || "[]");
-    if (!Array.isArray(arr)) return null;
-    return arr
+    const parsed = JSON.parse(rows[0].value || "[]");
+    if (!Array.isArray(parsed)) return null;
+    return parsed
       .map((x: any) => Number(x))
       .filter((n: number) => Number.isFinite(n) && n > 0);
   } catch {
@@ -92,6 +95,8 @@ function isManager(session: { role?: string; username?: string }) {
   return role === "manager" || uname === "manager";
 }
 
+type QueueBucket = { today: number; month: number };
+
 export async function GET(req: NextRequest) {
   try {
     const session = getSessionFromRequest(req);
@@ -133,8 +138,130 @@ export async function GET(req: NextRequest) {
     );
 
     const statsByWs: Record<string, Record<string, any>> = {};
+    const assignByWs: Record<string, Record<string, number[]>> = {};
     for (const ws of workspaces) {
       statsByWs[ws] = await loadStatsMap(ws);
+      const raw = await loadJsonSetting(settingKey("smtp_assignments", ws), {});
+      const map: Record<string, number[]> = {};
+      if (raw && typeof raw === "object") {
+        for (const [uid, ids] of Object.entries(raw)) {
+          if (Array.isArray(ids)) {
+            map[String(uid)] = ids
+              .map((x) => Number(x))
+              .filter((n) => Number.isFinite(n) && n > 0);
+          }
+        }
+      }
+      assignByWs[ws] = map;
+    }
+
+    const byGmail: Record<string, QueueBucket> = {};
+    const byWorkspace: Record<string, QueueBucket> = {};
+    let queueToday = 0;
+    let queueMonth = 0;
+    try {
+      const q = await pool.query(
+        `SELECT
+           COALESCE(NULLIF(lower(workspace), ''), 'main') AS workspace,
+           gmail_used_id,
+           COUNT(*) FILTER (
+             WHERE timezone('America/Los_Angeles', COALESCE(sent_at, created_at))::date
+               = timezone('America/Los_Angeles', now())::date
+           )::int AS today_cnt,
+           COUNT(*) FILTER (
+             WHERE date_trunc('month', timezone('America/Los_Angeles', COALESCE(sent_at, created_at)))
+               = date_trunc('month', timezone('America/Los_Angeles', now()))
+           )::int AS month_cnt
+         FROM queue
+         WHERE lower(COALESCE(status, '')) IN ('sent', 'done', 'success')
+         GROUP BY 1, 2`
+      );
+      for (const row of q.rows || []) {
+        const ws = String(row.workspace || "main").toLowerCase();
+        const t = Number(row.today_cnt || 0) || 0;
+        const m = Number(row.month_cnt || 0) || 0;
+        queueToday += t;
+        queueMonth += m;
+        if (!byWorkspace[ws]) byWorkspace[ws] = { today: 0, month: 0 };
+        byWorkspace[ws].today += t;
+        byWorkspace[ws].month += m;
+        if (row.gmail_used_id != null) {
+          const gid = String(row.gmail_used_id);
+          if (!byGmail[gid]) byGmail[gid] = { today: 0, month: 0 };
+          byGmail[gid].today += t;
+          byGmail[gid].month += m;
+        }
+      }
+    } catch (e) {
+      console.error("progress queue group:", e);
+    }
+
+    const gmailOwner: Record<string, number> = {};
+    for (const ws of workspaces) {
+      const map = assignByWs[ws] || {};
+      for (const [uid, gids] of Object.entries(map)) {
+        const userId = Number(uid);
+        if (!Number.isFinite(userId)) continue;
+        for (const gid of gids) {
+          const key = String(gid);
+          if (!gmailOwner[key]) gmailOwner[key] = userId;
+        }
+      }
+    }
+
+    const userQueue: Record<number, QueueBucket> = {};
+    for (const [gid, bucket] of Object.entries(byGmail)) {
+      const owner = gmailOwner[gid];
+      if (owner) {
+        if (!userQueue[owner]) userQueue[owner] = { today: 0, month: 0 };
+        userQueue[owner].today += bucket.today;
+        userQueue[owner].month += bucket.month;
+      }
+    }
+
+    const usersByWs: Record<string, any[]> = {};
+    for (const u of userRows) {
+      const r = normalizeRole(String(u.role || ""));
+      if (r === "manager") continue;
+      const ws = String(u.workspace || "main").toLowerCase();
+      if (!usersByWs[ws]) usersByWs[ws] = [];
+      usersByWs[ws].push(u);
+    }
+
+    function pickPrimary(list: any[]): any | null {
+      if (!list?.length) return null;
+      const order = ["super_admin", "admin", "operator"];
+      for (const role of order) {
+        const hit = list.find(
+          (u) => normalizeRole(String(u.role || "")) === role
+        );
+        if (hit) return hit;
+      }
+      return list[0];
+    }
+
+    for (const [ws, bucket] of Object.entries(byWorkspace)) {
+      let attributedToday = 0;
+      let attributedMonth = 0;
+      for (const u of usersByWs[ws] || []) {
+        const id = Number(u.id);
+        const q = userQueue[id];
+        if (q) {
+          attributedToday += q.today;
+          attributedMonth += q.month;
+        }
+      }
+      const remToday = Math.max(0, bucket.today - attributedToday);
+      const remMonth = Math.max(0, bucket.month - attributedMonth);
+      if (remToday > 0 || remMonth > 0) {
+        const primary = pickPrimary(usersByWs[ws] || []);
+        if (primary) {
+          const id = Number(primary.id);
+          if (!userQueue[id]) userQueue[id] = { today: 0, month: 0 };
+          userQueue[id].today += remToday;
+          userQueue[id].month += remMonth;
+        }
+      }
     }
 
     const people: {
@@ -157,18 +284,19 @@ export async function GET(req: NextRequest) {
       const st = map[String(u.id)] || map[String(u.username)] || {};
       let sentToday = Number(st.sentToday || 0) || 0;
       let sentMonth = Number(st.sentMonth || 0) || 0;
-      const totalSent = Number(st.totalSent || 0) || 0;
+      let totalSent = Number(st.totalSent || 0) || 0;
       if (st.lastDate && st.lastDate !== dayKey) sentToday = 0;
       if (st.lastMonth && st.lastMonth !== monthKey) sentMonth = 0;
-      if (
-        (!st.lastDate || st.lastDate === dayKey) &&
-        (!st.lastMonth || st.lastMonth === monthKey) &&
-        sentMonth < sentToday
-      ) {
-        sentMonth = sentToday;
-      }
 
       const id = Number(u.id);
+      const q = userQueue[id];
+      if (q) {
+        if (q.today > sentToday) sentToday = q.today;
+        if (q.month > sentMonth) sentMonth = q.month;
+        if (q.month > totalSent) totalSent = q.month;
+      }
+      if (sentMonth < sentToday) sentMonth = sentToday;
+
       const visibleToManager =
         visibleIds === null ? true : visibleIds.includes(id);
 
@@ -186,6 +314,7 @@ export async function GET(req: NextRequest) {
 
     people.sort((a, b) => {
       if (b.sentToday !== a.sentToday) return b.sentToday - a.sentToday;
+      if (b.sentMonth !== a.sentMonth) return b.sentMonth - a.sentMonth;
       return a.username.localeCompare(b.username);
     });
 
@@ -194,36 +323,11 @@ export async function GET(req: NextRequest) {
       ? people.filter((p) => p.visibleToManager)
       : people;
 
-    // Agent-stats sum (after system was built)
     let totalToday = shown.reduce((s, p) => s + (p.sentToday || 0), 0);
     let totalMonth = shown.reduce((s, p) => s + (p.sentMonth || 0), 0);
 
-    // Queue is source of truth for historical sends (before progress system + auto + manual)
-    try {
-      const q = await pool.query(
-        `SELECT
-           COUNT(*) FILTER (
-             WHERE timezone('America/Los_Angeles', COALESCE(sent_at, created_at))::date
-               = timezone('America/Los_Angeles', now())::date
-           )::int AS today_cnt,
-           COUNT(*) FILTER (
-             WHERE date_trunc('month', timezone('America/Los_Angeles', COALESCE(sent_at, created_at)))
-               = date_trunc('month', timezone('America/Los_Angeles', now()))
-           )::int AS month_cnt
-         FROM queue
-         WHERE lower(COALESCE(status, '')) IN ('sent', 'done', 'success')`
-      );
-      const row = q.rows?.[0];
-      if (row) {
-        const qt = Number(row.today_cnt || 0) || 0;
-        const qm = Number(row.month_cnt || 0) || 0;
-        if (qt > totalToday) totalToday = qt;
-        if (qm > totalMonth) totalMonth = qm;
-      }
-    } catch (e) {
-      console.error("progress queue totals:", e);
-    }
-
+    if (queueToday > totalToday) totalToday = queueToday;
+    if (queueMonth > totalMonth) totalMonth = queueMonth;
     if (totalMonth < totalToday) totalMonth = totalToday;
 
     return NextResponse.json({
