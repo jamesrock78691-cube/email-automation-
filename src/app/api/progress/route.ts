@@ -160,7 +160,6 @@ export async function GET(req: NextRequest) {
       const totalSent = Number(st.totalSent || 0) || 0;
       if (st.lastDate && st.lastDate !== dayKey) sentToday = 0;
       if (st.lastMonth && st.lastMonth !== monthKey) sentMonth = 0;
-      // same PST day: month counter must not lag behind today
       if (
         (!st.lastDate || st.lastDate === dayKey) &&
         (!st.lastMonth || st.lastMonth === monthKey) &&
@@ -195,8 +194,38 @@ export async function GET(req: NextRequest) {
       ? people.filter((p) => p.visibleToManager)
       : people;
 
-    const totalToday = shown.reduce((s, p) => s + (p.sentToday || 0), 0);
-    const totalMonth = shown.reduce((s, p) => s + (p.sentMonth || 0), 0);
+    let totalToday = shown.reduce((s, p) => s + (p.sentToday || 0), 0);
+    let totalMonth = shown.reduce((s, p) => s + (p.sentMonth || 0), 0);
+
+    // Super admin: queue counts (auto + manual) so month/today are complete
+    if (isSuperAdmin(session)) {
+      try {
+        const q = await pool.query(
+          `SELECT
+             COUNT(*) FILTER (
+               WHERE timezone('America/Los_Angeles', COALESCE(sent_at, created_at))::date
+                 = timezone('America/Los_Angeles', now())::date
+             )::int AS today_cnt,
+             COUNT(*) FILTER (
+               WHERE date_trunc('month', timezone('America/Los_Angeles', COALESCE(sent_at, created_at)))
+                 = date_trunc('month', timezone('America/Los_Angeles', now()))
+             )::int AS month_cnt
+           FROM queue
+           WHERE lower(COALESCE(status, '')) IN ('sent', 'done', 'success')`
+        );
+        const row = q.rows?.[0];
+        if (row) {
+          const qt = Number(row.today_cnt || 0) || 0;
+          const qm = Number(row.month_cnt || 0) || 0;
+          if (qt > totalToday) totalToday = qt;
+          if (qm > totalMonth) totalMonth = qm;
+        }
+      } catch (e) {
+        console.error("progress queue totals:", e);
+      }
+    }
+
+    if (totalMonth < totalToday) totalMonth = totalToday;
 
     return NextResponse.json({
       success: true,
