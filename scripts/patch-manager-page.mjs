@@ -1,5 +1,9 @@
 #!/usr/bin/env node
-/** Patch page.tsx for Manager read-only progress panel + login tab. */
+/**
+ * Manager read-only progress panel.
+ * Hooks MUST be injected BEFORE any early returns (authChecked / authUser)
+ * or React will crash the login page.
+ */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,9 +20,18 @@ if (!fs.existsSync(FILE)) {
   process.exit(0);
 }
 let text = fs.readFileSync(FILE, "utf8");
-if (text.includes("isManagerOnly") && text.includes("Team Progress")) {
-  console.log("patch-manager-page: already applied");
-  process.exit(0);
+
+// Strip previous broken injection if present
+if (text.includes("isManagerOnly") || text.includes("Team Progress")) {
+  const start = text.indexOf("const isManagerOnly");
+  if (start >= 0) {
+    let end = text.indexOf("// Login screen", start);
+    if (end < 0) end = text.indexOf("if (!authUser) {", start);
+    if (end > start) {
+      text = text.slice(0, start) + text.slice(end);
+      console.log("patch-manager-page: stripped previous manager injection");
+    }
+  }
 }
 
 function patch(oldStr, newStr, label) {
@@ -41,12 +54,34 @@ patch(
   "placeholder"
 );
 
-if (!text.includes("isManagerOnly")) {
-  const mgrHooks = `
+const HOOKS = `
   const isManagerOnly = !!authUser && (String(authUser.role || "").toLowerCase() === "manager" || String(authUser.username || "").toLowerCase() === "manager");
   const [managerPeople, setManagerPeople] = useState<any[]>([]);
   const [managerTotals, setManagerTotals] = useState({ totalToday: 0, totalMonth: 0, dayKey: "", monthKey: "" });
   const [managerLoading, setManagerLoading] = useState(false);
+`;
+
+if (!text.includes("isManagerOnly")) {
+  const anchor = 'const [loginPanel, setLoginPanel] = useState<"admin" | "operator" | "manager">("admin");';
+  const anchor2 = 'const [loginPanel, setLoginPanel] = useState<"admin" | "operator">("admin");';
+  if (text.includes(anchor)) {
+    text = text.replace(anchor, anchor + "\n" + HOOKS);
+    console.log("hooks after loginPanel (mgr type)");
+  } else if (text.includes(anchor2)) {
+    text = text.replace(anchor2, anchor2 + "\n" + HOOKS);
+    console.log("hooks after loginPanel");
+  } else {
+    const a3 = "const [authChecked, setAuthChecked] = useState(false);";
+    if (text.includes(a3)) {
+      text = text.replace(a3, a3 + "\n" + HOOKS);
+      console.log("hooks after authChecked");
+    } else {
+      console.warn("no hooks anchor");
+    }
+  }
+}
+
+const EFFECT = `
   const loadManagerProgress = async () => {
     try {
       setManagerLoading(true);
@@ -54,7 +89,12 @@ if (!text.includes("isManagerOnly")) {
       const data = await res.json();
       if (data.success) {
         setManagerPeople(data.people || []);
-        setManagerTotals({ totalToday: data.totalToday || 0, totalMonth: data.totalMonth || 0, dayKey: data.dayKey || "", monthKey: data.monthKey || "" });
+        setManagerTotals({
+          totalToday: data.totalToday || 0,
+          totalMonth: data.totalMonth || 0,
+          dayKey: data.dayKey || "",
+          monthKey: data.monthKey || "",
+        });
       }
     } catch {}
     finally { setManagerLoading(false); }
@@ -65,7 +105,19 @@ if (!text.includes("isManagerOnly")) {
     const id = setInterval(loadManagerProgress, 30000);
     return () => clearInterval(id);
   }, [isManagerOnly]);
+`;
 
+if (!text.includes("loadManagerProgress")) {
+  if (text.includes("// Loading auth")) {
+    text = text.replace("// Loading auth", EFFECT + "\n  // Loading auth");
+    console.log("effect before Loading auth");
+  } else if (text.includes("if (!authChecked)")) {
+    text = text.replace("if (!authChecked)", EFFECT + "\n  if (!authChecked)");
+    console.log("effect before authChecked return");
+  }
+}
+
+const VIEW = `
   if (isManagerOnly) {
     return (
       <div className="min-h-screen bg-slate-950 text-white p-6">
@@ -125,12 +177,18 @@ if (!text.includes("isManagerOnly")) {
       </div>
     );
   }
+
 `;
-  if (text.includes("if (!authUser) {")) {
-    text = text.replace("if (!authUser) {", mgrHooks + "\n  if (!authUser) {");
-    console.log("manager panel injected");
-  } else {
-    console.warn("authUser gate not found");
+
+if (!text.includes("Team Progress")) {
+  if (text.includes("// Login screen")) {
+    text = text.replace("// Login screen", VIEW + "  // Login screen");
+    console.log("manager view before Login screen");
+  } else if (text.includes("if (!authUser) {")) {
+    text = text.replace(
+      "// Login screen — separate Admin/Super Admin vs Operator panels\n  if (!authUser) {",
+      VIEW + "  // Login screen — separate Admin/Super Admin vs Operator panels\n  if (!authUser) {"
+    );
   }
 }
 
@@ -149,6 +207,11 @@ if (text.includes(">Operator</button>") && !text.includes('setLoginPanel("manage
               >Manager</button>`
   );
   console.log("manager login button");
+}
+
+if (text.includes("const isManagerOnly") && text.indexOf("const isManagerOnly") > text.indexOf("if (!authChecked)")) {
+  console.error("FATAL: isManagerOnly still after authChecked return — hooks order broken");
+  process.exit(1);
 }
 
 fs.writeFileSync(FILE, text);
