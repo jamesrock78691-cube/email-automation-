@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * Manager read-only progress panel + Super Admin visibility settings.
- * Hooks MUST be before any early returns (authChecked / authUser).
+ * Manager progress panel + Super Admin "Team Progress" TAB (not on main home).
+ * Manager: only totals (today/month), no auto/manual split.
+ * Hooks before any early returns.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -20,30 +21,27 @@ if (!fs.existsSync(FILE)) {
 }
 let text = fs.readFileSync(FILE, "utf8");
 
-if (text.includes("Manager can see") && text.includes("saveManagerVisibility") && text.includes("isManagerOnly")) {
-  console.log("patch-manager-page: already has visibility UI");
-  process.exit(0);
-}
-
-if (text.includes("isManagerOnly") || text.includes("Team Progress")) {
-  const start = text.indexOf("const isManagerOnly");
+if (text.includes("Manager Progress Visibility")) {
+  const start = text.indexOf("{/* Manager Progress Visibility");
   if (start >= 0) {
-    let end = text.indexOf("// Login screen", start);
-    if (end < 0) end = text.indexOf("if (!authUser) {", start);
-    const chk = text.indexOf("if (!authChecked)");
-    if (start > chk && end > start) {
+    const endMarker = "{/* Global Stats Grid";
+    const end = text.indexOf(endMarker, start);
+    if (end > start) {
       text = text.slice(0, start) + text.slice(end);
-      console.log("patch-manager-page: stripped broken early-return injection");
+      console.log("removed main-page visibility panel");
     }
   }
-  if (text.includes("Team Progress") && text.indexOf("Team Progress") > text.indexOf("if (!authChecked)")) {
-    const tp = text.indexOf("if (isManagerOnly)");
-    if (tp > 0) {
-      const end = text.indexOf("// Login screen", tp);
-      if (end > tp) {
-        text = text.slice(0, tp) + text.slice(end);
-        console.log("patch-manager-page: stripped old manager view");
-      }
+}
+
+if (text.includes("const isManagerOnly")) {
+  const start = text.indexOf("const isManagerOnly");
+  const chk = text.indexOf("if (!authChecked)");
+  if (start > chk && chk > 0) {
+    let end = text.indexOf("// Login screen", start);
+    if (end < 0) end = text.indexOf("if (!authUser) {", start);
+    if (end > start) {
+      text = text.slice(0, start) + text.slice(end);
+      console.log("stripped broken hooks after authChecked");
     }
   }
 }
@@ -85,16 +83,13 @@ if (!text.includes("isManagerOnly")) {
   const anchor2 = 'const [loginPanel, setLoginPanel] = useState<"admin" | "operator">("admin");';
   if (text.includes(anchor)) {
     text = text.replace(anchor, anchor + "\n" + HOOKS);
-    console.log("hooks after loginPanel (mgr type)");
+    console.log("hooks after loginPanel (mgr)");
   } else if (text.includes(anchor2)) {
     text = text.replace(anchor2, anchor2 + "\n" + HOOKS);
     console.log("hooks after loginPanel");
   } else {
     const a3 = "const [authChecked, setAuthChecked] = useState(false);";
-    if (text.includes(a3)) {
-      text = text.replace(a3, a3 + "\n" + HOOKS);
-      console.log("hooks after authChecked state");
-    }
+    if (text.includes(a3)) text = text.replace(a3, a3 + "\n" + HOOKS);
   }
 }
 
@@ -134,9 +129,7 @@ const EFFECT = `
       if (data.success) {
         setManagerSaveMsg("Saved — manager will only see selected people.");
         await loadManagerProgress();
-      } else {
-        setManagerSaveMsg(data.error || "Save failed");
-      }
+      } else setManagerSaveMsg(data.error || "Save failed");
     } catch (e: any) {
       setManagerSaveMsg(e?.message || "Save failed");
     }
@@ -147,6 +140,9 @@ const EFFECT = `
     const id = setInterval(loadManagerProgress, 30000);
     return () => clearInterval(id);
   }, [isManagerOnly, isSuperAdminUser]);
+  useEffect(() => {
+    if (activeTab === "team_progress" && isSuperAdminUser) loadManagerProgress();
+  }, [activeTab, isSuperAdminUser]);
 `;
 
 if (!text.includes("loadManagerProgress")) {
@@ -155,7 +151,17 @@ if (!text.includes("loadManagerProgress")) {
     console.log("effect before Loading auth");
   } else if (text.includes("if (!authChecked)")) {
     text = text.replace("if (!authChecked)", EFFECT + "\n  if (!authChecked)");
-    console.log("effect before authChecked");
+  }
+} else if (!text.includes('activeTab === "team_progress"')) {
+  if (text.includes("[isManagerOnly, isSuperAdminUser]")) {
+    text = text.replace(
+      "[isManagerOnly, isSuperAdminUser]);",
+      `[isManagerOnly, isSuperAdminUser]);
+  useEffect(() => {
+    if (activeTab === "team_progress" && isSuperAdminUser) loadManagerProgress();
+  }, [activeTab, isSuperAdminUser]);`
+    );
+    console.log("added team_progress tab effect");
   }
 }
 
@@ -167,7 +173,7 @@ const VIEW = `
           <div className="flex items-center justify-between mb-6">
             <div>
               <h1 className="text-2xl font-bold">Team Progress</h1>
-              <p className="text-slate-400 text-sm">PST day {managerTotals.dayKey || "—"} · Month {managerTotals.monthKey || "—"}</p>
+              <p className="text-slate-400 text-sm">Total sent only · PST day {managerTotals.dayKey || "—"} · Month {managerTotals.monthKey || "—"}</p>
             </div>
             <div className="flex gap-2">
               <button type="button" onClick={loadManagerProgress} className="px-3 py-1.5 rounded bg-slate-800 text-sm border border-slate-700">Refresh</button>
@@ -176,11 +182,11 @@ const VIEW = `
           </div>
           <div className="grid grid-cols-2 gap-4 mb-6">
             <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-              <p className="text-xs text-slate-400 uppercase">Total Today (PST)</p>
+              <p className="text-xs text-slate-400 uppercase">Total Sent Today</p>
               <p className="text-3xl font-bold text-emerald-400">{managerTotals.totalToday}</p>
             </div>
             <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-              <p className="text-xs text-slate-400 uppercase">Total This Month</p>
+              <p className="text-xs text-slate-400 uppercase">Total Sent This Month</p>
               <p className="text-3xl font-bold text-blue-400">{managerTotals.totalMonth}</p>
             </div>
           </div>
@@ -189,22 +195,20 @@ const VIEW = `
               <thead className="bg-slate-900 text-slate-400 text-left">
                 <tr>
                   <th className="p-3">Name</th>
-                  <th className="p-3">Role</th>
                   <th className="p-3">Workspace</th>
-                  <th className="p-3 text-right">Today</th>
-                  <th className="p-3 text-right">Month</th>
+                  <th className="p-3 text-right">Sent Today</th>
+                  <th className="p-3 text-right">Sent Month</th>
                 </tr>
               </thead>
               <tbody>
                 {managerLoading && managerPeople.length === 0 ? (
-                  <tr><td colSpan={5} className="p-6 text-center text-slate-500">Loading…</td></tr>
+                  <tr><td colSpan={4} className="p-6 text-center text-slate-500">Loading…</td></tr>
                 ) : managerPeople.length === 0 ? (
-                  <tr><td colSpan={5} className="p-6 text-center text-slate-500">No data yet</td></tr>
+                  <tr><td colSpan={4} className="p-6 text-center text-slate-500">No data yet</td></tr>
                 ) : (
                   managerPeople.map((p: any) => (
                     <tr key={String(p.id) + p.username} className="border-t border-slate-800/80">
                       <td className="p-3 font-medium">{p.username}</td>
-                      <td className="p-3 text-slate-400">{p.role}</td>
                       <td className="p-3 text-slate-400">{p.workspace}</td>
                       <td className="p-3 text-right text-emerald-400 font-semibold">{p.sentToday}</td>
                       <td className="p-3 text-right text-blue-400 font-semibold">{p.sentMonth}</td>
@@ -214,7 +218,7 @@ const VIEW = `
               </tbody>
             </table>
           </div>
-          <p className="text-[11px] text-slate-500 mt-4">Auto + manual sends. Day resets 00:00 PST. Month starts on the 1st (PST).</p>
+          <p className="text-[11px] text-slate-500 mt-4">Includes auto + manual sends as one total. Day resets 00:00 PST. Month from the 1st (PST).</p>
         </div>
       </div>
     );
@@ -222,97 +226,135 @@ const VIEW = `
 
 `;
 
-if (!text.includes("Team Progress")) {
+if (!text.includes("Total Sent This Month") && !text.includes("Team Progress")) {
   if (text.includes("// Login screen")) {
     text = text.replace("// Login screen", VIEW + "  // Login screen");
-    console.log("manager view before Login screen");
+    console.log("manager view injected");
   }
 }
 
-const ADMIN_PANEL = `
-        {/* Manager Progress Visibility — Super Admin only */}
-        {isSuperAdminUser && (
-          <section className="rounded-2xl border border-indigo-800/50 bg-slate-950/60 p-5 space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="text-lg font-bold text-white">Manager Progress Visibility</h2>
-                <p className="text-xs text-slate-400">Choose who the manager account can see. Totals use PST (day 00:00 · month from 1st).</p>
+const TAB_BTN = `
+          {isSuperAdminUser && (
+            <button
+              onClick={() => setActiveTab("team_progress")}
+              className={\`flex items-center gap-2 px-5 py-3 text-sm font-semibold border-b-2 transition \${
+                activeTab === "team_progress"
+                  ? "border-indigo-500 text-indigo-400"
+                  : "border-transparent text-slate-400 hover:text-white"
+              \}`}
+            >
+              Team Progress
+            </button>
+          )}
+`;
+
+if (!text.includes('setActiveTab("team_progress")')) {
+  if (text.includes("Admin Panel")) {
+    const navClose = text.indexOf("        </div>\n\n\n        {/* Tab 1: Dashboard Panel */}");
+    if (navClose > 0) {
+      text = text.slice(0, navClose) + TAB_BTN + "\n" + text.slice(navClose);
+      console.log("team_progress tab button injected");
+    } else {
+      const m = text.indexOf("{/* Tab 1: Dashboard Panel */}");
+      if (m > 0) {
+        const prev = text.lastIndexOf("</div>", m);
+        text = text.slice(0, prev) + TAB_BTN + "\n        " + text.slice(prev);
+        console.log("team_progress tab button injected (alt)");
+      } else {
+        console.warn("nav close not found");
+      }
+    }
+  }
+}
+
+const TAB_CONTENT = `
+        {activeTab === "team_progress" && isSuperAdminUser && (
+          <div className="space-y-6">
+            <section className="rounded-2xl border border-indigo-800/50 bg-slate-950/60 p-5 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-bold text-white">Team Progress</h2>
+                  <p className="text-xs text-slate-400">Total sent (auto + manual combined). Choose who the manager can see. PST day 00:00 · month from 1st.</p>
+                </div>
+                <div className="flex gap-2">
+                  <button type="button" onClick={loadManagerProgress} className="px-3 py-1.5 rounded-lg bg-slate-800 text-xs border border-slate-700">Refresh</button>
+                  <button type="button" onClick={saveManagerVisibility} className="px-3 py-1.5 rounded-lg bg-indigo-600 text-xs font-semibold">Save visibility</button>
+                </div>
               </div>
-              <div className="flex gap-2">
-                <button type="button" onClick={loadManagerProgress} className="px-3 py-1.5 rounded-lg bg-slate-800 text-xs border border-slate-700">Refresh</button>
-                <button type="button" onClick={saveManagerVisibility} className="px-3 py-1.5 rounded-lg bg-indigo-600 text-xs font-semibold">Save visibility</button>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="rounded-xl border border-slate-800 p-3">
+                  <p className="text-[10px] uppercase text-slate-500">Total Sent Today</p>
+                  <p className="text-2xl font-bold text-emerald-400">{managerTotals.totalToday}</p>
+                </div>
+                <div className="rounded-xl border border-slate-800 p-3">
+                  <p className="text-[10px] uppercase text-slate-500">Total Sent This Month</p>
+                  <p className="text-2xl font-bold text-blue-400">{managerTotals.totalMonth}</p>
+                </div>
+                <div className="rounded-xl border border-slate-800 p-3">
+                  <p className="text-[10px] uppercase text-slate-500">PST Day</p>
+                  <p className="text-sm font-semibold text-slate-200">{managerTotals.dayKey || "—"}</p>
+                </div>
+                <div className="rounded-xl border border-slate-800 p-3">
+                  <p className="text-[10px] uppercase text-slate-500">PST Month</p>
+                  <p className="text-sm font-semibold text-slate-200">{managerTotals.monthKey || "—"}</p>
+                </div>
               </div>
-            </div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <div className="rounded-xl border border-slate-800 p-3">
-                <p className="text-[10px] uppercase text-slate-500">Total Today</p>
-                <p className="text-2xl font-bold text-emerald-400">{managerTotals.totalToday}</p>
+              {managerSaveMsg && <p className="text-xs text-indigo-300">{managerSaveMsg}</p>}
+              <div className="overflow-x-auto rounded-xl border border-slate-800">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-900 text-slate-400 text-left">
+                    <tr>
+                      <th className="p-2">Manager can see</th>
+                      <th className="p-2">Name</th>
+                      <th className="p-2">Role</th>
+                      <th className="p-2">Workspace</th>
+                      <th className="p-2 text-right">Sent Today</th>
+                      <th className="p-2 text-right">Sent Month</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(managerAllPeople.length ? managerAllPeople : managerPeople).map((p: any) => {
+                      const id = Number(p.id);
+                      const checked = managerVisibleIds.includes(id);
+                      return (
+                        <tr key={String(id) + p.username} className="border-t border-slate-800/80">
+                          <td className="p-2">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={(e) => {
+                                if (e.target.checked) setManagerVisibleIds((prev) => Array.from(new Set([...prev, id])));
+                                else setManagerVisibleIds((prev) => prev.filter((x) => x !== id));
+                              }}
+                            />
+                          </td>
+                          <td className="p-2 font-medium">{p.username}</td>
+                          <td className="p-2 text-slate-400">{p.role}</td>
+                          <td className="p-2 text-slate-400">{p.workspace}</td>
+                          <td className="p-2 text-right text-emerald-400 font-semibold">{p.sentToday}</td>
+                          <td className="p-2 text-right text-blue-400 font-semibold">{p.sentMonth}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
-              <div className="rounded-xl border border-slate-800 p-3">
-                <p className="text-[10px] uppercase text-slate-500">Total Month</p>
-                <p className="text-2xl font-bold text-blue-400">{managerTotals.totalMonth}</p>
-              </div>
-              <div className="rounded-xl border border-slate-800 p-3">
-                <p className="text-[10px] uppercase text-slate-500">PST Day</p>
-                <p className="text-sm font-semibold text-slate-200">{managerTotals.dayKey || "—"}</p>
-              </div>
-              <div className="rounded-xl border border-slate-800 p-3">
-                <p className="text-[10px] uppercase text-slate-500">PST Month</p>
-                <p className="text-sm font-semibold text-slate-200">{managerTotals.monthKey || "—"}</p>
-              </div>
-            </div>
-            {managerSaveMsg && <p className="text-xs text-indigo-300">{managerSaveMsg}</p>}
-            <div className="overflow-x-auto rounded-xl border border-slate-800">
-              <table className="w-full text-sm">
-                <thead className="bg-slate-900 text-slate-400 text-left">
-                  <tr>
-                    <th className="p-2">Manager can see</th>
-                    <th className="p-2">Name</th>
-                    <th className="p-2">Role</th>
-                    <th className="p-2">Workspace</th>
-                    <th className="p-2 text-right">Today</th>
-                    <th className="p-2 text-right">Month</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(managerAllPeople.length ? managerAllPeople : managerPeople).map((p: any) => {
-                    const id = Number(p.id);
-                    const checked = managerVisibleIds.includes(id);
-                    return (
-                      <tr key={String(id) + p.username} className="border-t border-slate-800/80">
-                        <td className="p-2">
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={(e) => {
-                              if (e.target.checked) setManagerVisibleIds((prev) => Array.from(new Set([...prev, id])));
-                              else setManagerVisibleIds((prev) => prev.filter((x) => x !== id));
-                            }}
-                          />
-                        </td>
-                        <td className="p-2 font-medium">{p.username}</td>
-                        <td className="p-2 text-slate-400">{p.role}</td>
-                        <td className="p-2 text-slate-400">{p.workspace}</td>
-                        <td className="p-2 text-right text-emerald-400 font-semibold">{p.sentToday}</td>
-                        <td className="p-2 text-right text-blue-400 font-semibold">{p.sentMonth}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </section>
+            </section>
+          </div>
         )}
 
 `;
 
-if (!text.includes("Manager Progress Visibility")) {
-  if (text.includes("{/* Global Stats Grid — Super Admin / Admin only */}")) {
+if (!text.includes("Save visibility")) {
+  if (text.includes("{/* Footer information bar */}")) {
     text = text.replace(
-      "{/* Global Stats Grid — Super Admin / Admin only */}",
-      ADMIN_PANEL + "        {/* Global Stats Grid — Super Admin / Admin only */}"
+      "{/* Footer information bar */}",
+      TAB_CONTENT + "\n      {/* Footer information bar */}"
     );
-    console.log("super admin visibility panel injected");
+    console.log("team_progress tab content injected");
+  } else if (text.includes("<footer")) {
+    text = text.replace("<footer", TAB_CONTENT + "\n      <footer");
+    console.log("team_progress tab content before footer");
   }
 }
 
