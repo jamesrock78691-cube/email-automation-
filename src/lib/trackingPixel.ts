@@ -49,10 +49,10 @@ export function buildTrackingPixelHtml(
   const id = encodeURIComponent(String(trackingId || "").trim());
   if (!id) return "";
 
-  let src = `${origin}/p/${id}.png`;
+  let src = `${origin}/p/${id}.png?r=${Date.now()}`;
   const email = String(recipientEmail || "").trim().toLowerCase();
   if (email && email.includes("@")) {
-    src += `?e=${encodeURIComponent(email)}`;
+    src += `&e=${encodeURIComponent(email)}`;
   }
 
   // 3x3, table-wrapped, never display:none — Gmail skips hidden 1x1 trackers
