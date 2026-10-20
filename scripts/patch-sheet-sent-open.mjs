@@ -1,363 +1,374 @@
 #!/usr/bin/env node
 /**
- * Bulletproof sheet Sent status + open tracking fixes.
- * Runs after restore-emailSender / restore-googleSheets / patch-sandeer.
+ * Reliable sheet Sent + Open Count (admin/sandeer/amazon)
+ * and pixel open_count via pool (unique opens).
  */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
-const senderPath = path.join(root, "src", "app", "services", "emailSender.ts");
-const sheetsPath = path.join(root, "src", "app", "services", "googleSheets.ts");
-const trackPath = path.join(
-  root,
-  "src",
-  "app",
-  "api",
-  "track",
-  "[trackingId]",
-  "route.ts"
-);
+const sheetsPath = path.join(root, "src/app/services/googleSheets.ts");
+const senderPath = path.join(root, "src/app/services/emailSender.ts");
+const trackPath = path.join(root, "src/app/api/track/[trackingId]/route.ts");
+const dashPath = path.join(root, "src/app/api/dashboard/route.ts");
 
-const SENT_BLOCK = `    // Sheet Status → Sent (tracking ID first, then email+Imported, never match empty serial)
-    try {
-      const rows = await readRows(ws);
-      const emailKey = String(item.email || "").trim().toLowerCase();
-      const serialKey = String(item.serialNo || "").trim();
-      const refKey = String(item.referenceNo || "").trim();
-      const trackKey = String(trackingId || item.trackingId || "").trim();
-
-      const score = (r: any) => {
-        let s = 0;
-        const rt = String(r.trackingId || "").trim();
-        if (trackKey && rt && rt.toLowerCase() === trackKey.toLowerCase()) s += 100;
-        const re = String(r.email || "").trim().toLowerCase();
-        if (emailKey && re && re === emailKey) s += 40;
-        const rs = String(r.serialNo || "").trim();
-        if (serialKey && rs && rs === serialKey) s += 30;
-        const rr = String(r.referenceNo || "").trim();
-        if (refKey && rr && rr === refKey) s += 20;
-        const st = String(r.status || "").trim().toLowerCase();
-        if (st === "imported" || st === "pending" || st === "") s += 5;
-        return s;
-      };
-
-      let best: any = null;
-      let bestScore = 0;
-      for (const r of rows) {
-        const sc = score(r);
-        if (sc > bestScore) {
-          bestScore = sc;
-          best = r;
-        }
-      }
-      // Require at least email or tracking or serial match
-      if (best && bestScore >= 30) {
-        await updateRow(
-          best.rowNumber,
-          {
-            status: "Sent",
-            sentAt: new Date().toISOString(),
-            gmailUsed: finalUsedAccount.email,
-            trackingId: trackKey || best.trackingId || "",
-          },
-          ws
-        );
-        console.log(
-          "[SHEET SENT] ws=" +
-            ws +
-            " row=" +
-            best.rowNumber +
-            " score=" +
-            bestScore +
-            " email=" +
-            emailKey +
-            " track=" +
-            trackKey
-        );
-      } else {
-        console.error(
-          "[SHEET SENT] no match ws=" +
-            ws +
-            " email=" +
-            emailKey +
-            " serial=" +
-            serialKey +
-            " track=" +
-            trackKey +
-            " rows=" +
-            rows.length
-        );
-      }
-    } catch (err) {
-      console.error("Google Sheet update failed", err);
-    }`;
-
-// ---- emailSender ----
-if (fs.existsSync(senderPath)) {
-  let t = fs.readFileSync(senderPath, "utf8");
-  // Replace any existing sheet-update try block after status sent
-  const re =
-    /try\s*\{\s*const rows = await readRows\([^)]*\);[\s\S]*?console\.error\(\s*"Google Sheet update failed"\s*,\s*err\s*\);\s*\}/;
-  if (re.test(t)) {
-    t = t.replace(re, SENT_BLOCK.trim());
-    console.log("emailSender: Sent block replaced (regex)");
-  } else {
-    // insert before return success after queue status sent
-    const marker =
-      'return {\n      success: true,\n      gmailUsedEmail: finalUsedAccount.email,';
-    if (t.includes(marker) && !t.includes("[SHEET SENT]")) {
-      t = t.replace(marker, SENT_BLOCK + "\n\n    " + marker);
-      console.log("emailSender: Sent block inserted before return");
-    } else {
-      console.warn("emailSender: could not locate sheet block");
-    }
-  }
-  fs.writeFileSync(senderPath, t);
+const HELPERS = `
+function normSheet(v: any): string {
+  return String(v ?? "").trim().toLowerCase();
 }
 
-// ---- googleSheets: wider headers + open by tracking (case-insensitive) ----
-if (fs.existsSync(sheetsPath)) {
-  let t = fs.readFileSync(sheetsPath, "utf8");
-
-  // Expand header aliases for Status / Tracking / Open Count
-  t = t.replace(
-    'status: headerIndex(headers, "Status", "status"),',
-    'status: headerIndex(headers, "Status", "status", "STATUS", "Email Status", "Send Status"),'
-  );
-  t = t.replace(
-    /trackingId:\s*headerIndex\(\s*headers,\s*"Tracking ID",\s*"tracking_id",\s*"Tracking Id"\s*\)/,
-    'trackingId: headerIndex(headers, "Tracking ID", "tracking_id", "Tracking Id", "tracking id", "TrackingID", "Track ID")'
-  );
-  t = t.replace(
-    'openCount: headerIndex(headers, "Open Count", "open_count"),',
-    'openCount: headerIndex(headers, "Open Count", "open_count", "Opens", "opens", "Open", "Unique Opens", "OpenCount"),'
-  );
-  t = t.replace(
-    'openedAt: headerIndex(headers, "Opened At", "opened_at"),',
-    'openedAt: headerIndex(headers, "Opened At", "opened_at", "Open At", "Last Opened", "Last Opened At"),'
-  );
-  t = t.replace(
-    'sentAt: headerIndex(headers, "Sent At", "sent_at"),',
-    'sentAt: headerIndex(headers, "Sent At", "sent_at", "Sent", "Date Sent", "Sent Date"),'
-  );
-  t = t.replace(
-    'gmailUsed: headerIndex(headers, "Gmail Used", "gmail_used"),',
-    'gmailUsed: headerIndex(headers, "Gmail Used", "gmail_used", "SMTP Used", "From", "Sender"),'
-  );
-
-  // Log when no status column
-  if (!t.includes("[SHEETS] missing status column")) {
-    t = t.replace(
-      "const used = Object.values(cols).filter((c) => c >= 0);\n  if (!used.length) return;",
-      `const used = Object.values(cols).filter((c) => c >= 0);
-  if (!used.length) {
-    console.error("[SHEETS] no writable columns. headers=", headers.join(" | "));
-    return;
+async function findAutoSheetDataRow(
+  ws: string | null | undefined,
+  match: {
+    trackingId?: string;
+    email?: string;
+    serialNo?: string;
+    referenceNo?: string;
+    sheetRow?: number | null;
   }
-  if (cols.status < 0) {
-    console.error("[SHEETS] missing status column. headers=", headers.join(" | "));
-  }`
-    );
+): Promise<{ rowNumber: number; openCount: number } | null> {
+  const sheet = await getAutoSheet(ws, { refresh: true });
+  await sheet.loadHeaderRow();
+  const headers: string[] = (sheet.headerValues || []).map((h: any) => String(h || ""));
+  if (!headers.length) return null;
+
+  const cols = {
+    trackingId: headerIndex(headers, "Tracking ID", "tracking_id", "Tracking Id", "tracking id", "TrackingID"),
+    email: headerIndex(headers, "Email", "email", "E-mail", "email address"),
+    serial: headerIndex(headers, "serial_no", "Serial No", "Serial", "serial"),
+    reference: headerIndex(headers, "reference_no", "Reference No", "Reference", "ref"),
+    openCount: headerIndex(headers, "Open Count", "open_count", "OpenCount", "opens"),
+  };
+
+  const directRow = Number(match.sheetRow || 0);
+  if (directRow > 1) {
+    return { rowNumber: directRow, openCount: 0 };
   }
 
-  // Rewrite recordOpenOnAutoSheet completely
-  const start = t.indexOf("export async function recordOpenOnAutoSheet(");
-  if (start >= 0) {
-    const next = t.indexOf("\nexport async function", start + 10);
-    const end = next > 0 ? next : t.length;
-    const NEW_OPEN = `export async function recordOpenOnAutoSheet(
+  const lastCol = Math.max(0, headers.length - 1);
+  const maxRow = Math.min(Math.max(sheet.rowCount || 2, 2), 3000);
+  let grid: any[][] = [];
+  try {
+    const range = \`A2:\${colLetter(lastCol)}\${maxRow}\`;
+    grid = ((await sheet.getCellsInRange(range)) as any[][]) || [];
+  } catch (err) {
+    console.error("[SHEET FIND] range failed", ws, err);
+    return null;
+  }
+
+  const wantTid = normSheet(match.trackingId);
+  const wantEmail = normSheet(match.email);
+  const wantSerial = normSheet(match.serialNo);
+  const wantRef = normSheet(match.referenceNo);
+  let fallback: { rowNumber: number; openCount: number } | null = null;
+
+  for (let i = 0; i < grid.length; i++) {
+    const row = grid[i] || [];
+    const cell = (idx: number) => (idx >= 0 ? String(row[idx] ?? "").trim() : "");
+    const tid = normSheet(cell(cols.trackingId));
+    const email = normSheet(cell(cols.email));
+    const serial = normSheet(cell(cols.serial));
+    const ref = normSheet(cell(cols.reference));
+    const ocRaw = parseInt(cell(cols.openCount) || "0", 10);
+    const openCount = Number.isFinite(ocRaw) ? ocRaw : 0;
+    const rowNumber = i + 2;
+    if (wantTid && tid && tid === wantTid) return { rowNumber, openCount };
+    if (!fallback && wantSerial && serial && serial === wantSerial) {
+      fallback = { rowNumber, openCount };
+    }
+    if (!fallback && wantEmail && email && email === wantEmail && wantSerial && serial === wantSerial) {
+      fallback = { rowNumber, openCount };
+    }
+    if (!fallback && wantEmail && email && email === wantEmail) {
+      fallback = { rowNumber, openCount };
+    }
+    if (!fallback && wantRef && ref && wantRef !== "n/a" && ref === wantRef) {
+      fallback = { rowNumber, openCount };
+    }
+  }
+  return fallback;
+}
+
+const SHEET_WORKSPACES = ["main", "sandeer", "amazon"];
+
+export async function syncQueueSendToSheet(
+  item: {
+    trackingId?: string;
+    email?: string;
+    serialNo?: string;
+    referenceNo?: string;
+    sheetRow?: number | null;
+  },
+  gmailEmail: string,
+  ws?: string | null
+) {
+  const order = [String(ws || "main").toLowerCase(), ...SHEET_WORKSPACES];
+  const seen = new Set<string>();
+  for (const w of order) {
+    if (!w || seen.has(w)) continue;
+    seen.add(w);
+    try {
+      const found = await findAutoSheetDataRow(w, item);
+      if (!found) continue;
+      await batchSetSheetCells(
+        [
+          {
+            rowNumber: found.rowNumber,
+            status: "Sent",
+            sentAt: new Date().toISOString(),
+            gmailUsed: gmailEmail || "",
+            trackingId: String(item.trackingId || ""),
+          },
+        ],
+        w
+      );
+      console.log("[SHEET SENT] ws=" + w + " row=" + found.rowNumber + " tid=" + (item.trackingId || ""));
+      return { success: true, rowNumber: found.rowNumber, workspace: w };
+    } catch (err) {
+      console.error("[SHEET SENT] fail", w, err);
+    }
+  }
+  console.error("[SHEET SENT] row not found", item?.email, item?.trackingId, "ws=" + ws);
+  return { success: false };
+}
+
+export async function bumpOpenOnAutoSheet(
   trackingId: string,
   openedAtIso?: string,
-  preferredWs?: string | null
+  preferredWs?: string | null,
+  hints?: { email?: string; serialNo?: string; referenceNo?: string }
 ) {
-  const allWs = ["main", "amazon", "sandeer"];
-  const tryWs = preferredWs
-    ? [String(preferredWs).toLowerCase(), ...allWs].filter(
-        (w, i, a) => w && a.indexOf(w) === i
-      )
-    : allWs;
-
   const id = String(trackingId || "").trim();
-  if (!id) return { success: false, error: "missing tracking id" };
-  const openedAt = openedAtIso || new Date().toISOString();
-
-  for (const ws of tryWs) {
+  if (!id) return { success: false, error: "no tracking id" };
+  const order = preferredWs
+    ? [String(preferredWs).toLowerCase(), ...SHEET_WORKSPACES]
+    : [...SHEET_WORKSPACES];
+  const seen = new Set<string>();
+  for (const w of order) {
+    if (!w || seen.has(w)) continue;
+    seen.add(w);
     try {
-      const cfg = resolveSheetConfig(ws);
-      if (!cfg.id) continue;
-      // refresh so we see latest Tracking ID after Sent write
-      await getAutoSheet(ws, { refresh: true });
-      const rows = await readRows(ws);
-      const hit = rows.find(
-        (r) =>
-          String(r.trackingId || "").trim().toLowerCase() === id.toLowerCase()
+      const found = await findAutoSheetDataRow(w, {
+        trackingId: id,
+        email: hints?.email,
+        serialNo: hints?.serialNo,
+        referenceNo: hints?.referenceNo,
+      });
+      if (!found) continue;
+      const next = (found.openCount || 0) + 1;
+      const openedAt = openedAtIso || new Date().toISOString();
+      await batchSetSheetCells(
+        [
+          {
+            rowNumber: found.rowNumber,
+            openCount: String(next),
+            openedAt,
+            trackingId: id,
+          },
+        ],
+        w
       );
-      if (!hit) {
-        console.log("[OPEN SHEET] tracking not found ws=" + ws + " id=" + id);
-        continue;
-      }
-      const prev = parseInt(
-        String(hit.openCount || "0").replace(/[^0-9]/g, "") || "0",
-        10
-      );
-      const nextCount = (Number.isFinite(prev) ? prev : 0) + 1;
-      await updateRow(
-        hit.rowNumber,
-        {
-          openCount: String(nextCount),
-          openedAt,
-          trackingId: id,
-        },
-        ws
-      );
-      console.log(
-        "[OPEN SHEET] ws=" +
-          ws +
-          " row=" +
-          hit.rowNumber +
-          " opens=" +
-          nextCount +
-          " id=" +
-          id
-      );
-      return {
-        success: true,
-        openCount: nextCount,
-        email: hit.email,
-        referenceNo: hit.referenceNo,
-        markName: hit.markName,
-        workspace: ws,
-      };
-    } catch (err: any) {
-      console.error(
-        "recordOpenOnAutoSheet ws=" + ws + ":",
-        err?.message || err
-      );
+      console.log("[OPEN SHEET] ws=" + w + " row=" + found.rowNumber + " count=" + next);
+      return { success: true, openCount: next, workspace: w };
+    } catch (err) {
+      console.error("[OPEN SHEET] fail", w, err);
     }
   }
   return { success: false, error: "tracking id not found on auto sheet" };
 }
 `;
-    t = t.slice(0, start) + NEW_OPEN + t.slice(end);
-    console.log("recordOpenOnAutoSheet rewritten");
-  }
 
-  fs.writeFileSync(sheetsPath, t);
-  console.log("googleSheets patched");
+function patchSheets() {
+  if (!fs.existsSync(sheetsPath)) {
+    console.log("patch-sheet-sync: no googleSheets");
+    return;
+  }
+  let t = fs.readFileSync(sheetsPath, "utf8");
+  if (!t.includes("export async function syncQueueSendToSheet")) {
+    const anchor = "export async function recordOpenOnAutoSheet";
+    if (!t.includes(anchor)) {
+      console.warn("patch-sheet-sync: recordOpenOnAutoSheet missing");
+    } else {
+      t = t.replace(anchor, HELPERS + "\n" + anchor);
+      console.log("patch-sheet-sync: helpers inserted");
+    }
+  }
+  const start = t.indexOf("export async function recordOpenOnAutoSheet");
+  const end = t.indexOf("export async function recordOpenOnManualSheet");
+  if (start >= 0 && end > start) {
+    const neu = `export async function recordOpenOnAutoSheet(
+  trackingId: string,
+  openedAtIso?: string,
+  preferredWs?: string | null
+) {
+  return bumpOpenOnAutoSheet(trackingId, openedAtIso, preferredWs);
 }
 
-// ---- track route: case-insensitive tracking match + atomic open + after() ----
-if (fs.existsSync(trackPath)) {
-  let t = fs.readFileSync(trackPath, "utf8");
+`;
+    t = t.slice(0, start) + neu + t.slice(end);
+    console.log("patch-sheet-sync: recordOpenOnAutoSheet replaced");
+  }
+  fs.writeFileSync(sheetsPath, t);
+}
 
-  if (!t.includes('after } from "next/server"') && !t.includes("after } from 'next/server'")) {
+function patchSender() {
+  if (!fs.existsSync(senderPath)) {
+    console.log("patch-sheet-sync: no emailSender");
+    return;
+  }
+  let t = fs.readFileSync(senderPath, "utf8");
+  if (!t.includes("syncQueueSendToSheet")) {
     t = t.replace(
-      'import { NextRequest, NextResponse } from "next/server";',
-      'import { NextRequest, NextResponse, after } from "next/server";'
+      'import { readRows, updateRow } from "@/app/services/googleSheets";',
+      'import { readRows, updateRow, syncQueueSendToSheet } from "@/app/services/googleSheets";'
     );
   }
-
-  // Case-insensitive queue lookup
-  if (!t.includes("lower(tracking_id)")) {
+  const re =
+    /try \{\s*const rows = await readRows\([\s\S]*?console\.error\("Google Sheet update failed", err\);\s*\}/;
+  if (re.test(t)) {
     t = t.replace(
-      `const matchedQueue = await db
-      .select()
-      .from(queue)
-      .where(eq(queue.trackingId, trackingId))
-      .limit(1);`,
-      `let matchedQueue = await db
-      .select()
-      .from(queue)
-      .where(eq(queue.trackingId, trackingId))
-      .limit(1);
-    if (!matchedQueue.length) {
-      try {
-        const loose = await db.execute(
-          sql\`SELECT * FROM queue WHERE lower(trim(tracking_id)) = lower(trim(\${trackingId})) LIMIT 1\`
-        );
-        const rows = (loose as any)?.rows || (Array.isArray(loose) ? loose : []);
-        if (rows.length) matchedQueue = rows as any;
-      } catch (e) {
-        console.error("loose tracking lookup failed:", e);
-      }
+      re,
+      `try {
+      await syncQueueSendToSheet(
+        {
+          trackingId,
+          email: item.email,
+          serialNo: item.serialNo,
+          referenceNo: item.referenceNo,
+          sheetRow: (item as any).sheetRow || (item as any).sheet_row || null,
+        },
+        finalUsedAccount.email,
+        ws
+      );
+    } catch (err) {
+      console.error("Google Sheet update failed", err);
     }`
     );
-    console.log("track: case-insensitive lookup");
+    console.log("patch-sheet-sync: sender sheet block replaced");
+  } else if (t.includes("syncQueueSendToSheet(")) {
+    console.log("patch-sheet-sync: sender already calls sync");
+  } else {
+    console.warn("patch-sheet-sync: sender sheet block NOT found");
   }
-
-  // Atomic open_count
-  if (!t.includes("coalesce(open_count, 0) + 1")) {
-    t = t.replace(
-      `try {
-        await db
-          .update(queue)
-          .set({
-            openCount: (qItem.openCount || 0) + 1,
-            lastOpenedAt: openedAt,
-          })
-          .where(eq(queue.id, qItem.id));
-      } catch (e) {
-        console.error("queue openCount update failed:", e);
-      }`,
-      `try {
-        await db.execute(
-          sql\`UPDATE queue
-              SET open_count = coalesce(open_count, 0) + 1,
-                  last_opened_at = \${openedAt}
-              WHERE id = \${qItem.id}\`
-        );
-      } catch (e) {
-        console.error("queue openCount update failed:", e);
-        try {
-          await db
-            .update(queue)
-            .set({
-              openCount: (Number(qItem.openCount) || 0) + 1,
-              lastOpenedAt: openedAt,
-            })
-            .where(eq(queue.id, qItem.id));
-        } catch (e2) {
-          console.error("queue openCount fallback failed:", e2);
-        }
-      }`
-    );
-    console.log("track: atomic open_count");
-  }
-
-  // after() for sheet updates (queue branch)
-  if (!t.includes("after(async () =>") && t.includes("recordOpenOnAutoSheet")) {
-    t = t.replace(
-      `// Update BOTH auto sheet and manual log sheet
-      await Promise.all([
-        recordOpenOnAutoSheet(trackingId, openedAtIso, ws).catch((err) =>
-          console.error("auto sheet open update failed:", err)
-        ),
-        recordOpenOnManualSheet(trackingId, openedAtIso).catch((err) =>
-          console.error("manual sheet open update failed:", err)
-        ),
-      ]);`,
-      `after(async () => {
-        try {
-          await Promise.all([
-            recordOpenOnAutoSheet(trackingId, openedAtIso, ws).catch((err) =>
-              console.error("auto sheet open update failed:", err)
-            ),
-            recordOpenOnManualSheet(trackingId, openedAtIso).catch((err) =>
-              console.error("manual sheet open update failed:", err)
-            ),
-          ]);
-        } catch (err) {
-          console.error("sheet open after() failed:", err);
-        }
-      });`
-    );
-    console.log("track: after() sheet updates");
-  }
-
-  fs.writeFileSync(trackPath, t);
-  console.log("track route patched");
+  fs.writeFileSync(senderPath, t);
 }
 
-console.log("patch-sheet-sent-open: done");
+function patchTrack() {
+  if (!fs.existsSync(trackPath)) {
+    console.log("patch-sheet-sync: no track route");
+    return;
+  }
+  let t = fs.readFileSync(trackPath, "utf8");
+  if (!t.includes('from "@/db"') && t.includes('from "@/db";')) {
+    t = t.replace('from "@/db";', 'from "@/db";\nimport { pool } from "@/db";');
+  }
+  if (t.includes('import { db } from "@/db";') && !t.includes("import { pool }")) {
+    t = t.replace('import { db } from "@/db";', 'import { db, pool } from "@/db";');
+  }
+  if (!t.includes("PIXEL_OPEN_SQL")) {
+    const sqlBlock = `      try {
+        // PIXEL_OPEN_SQL — atomic, works even if drizzle execute fails
+        const upd = await pool.query(
+          \`UPDATE queue
+             SET open_count = coalesce(open_count, 0) + 1,
+                 last_opened_at = $2
+           WHERE tracking_id = $1
+           RETURNING id, open_count, workspace, email, mark_name, reference_no\`,
+          [trackingId, openedAt]
+        );
+        const row = upd.rows?.[0];
+        if (row) {
+          try {
+            await pool.query(
+              \`INSERT INTO tracking_logs
+                 (queue_id, tracking_id, ip_address, user_agent, browser, device, opened_at, email, mark_name, reference_no, workspace)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)\`,
+              [
+                row.id,
+                trackingId,
+                ipAddress,
+                userAgent,
+                browser,
+                device,
+                openedAt,
+                row.email || emailFromQuery || null,
+                row.mark_name || null,
+                row.reference_no || null,
+                String(row.workspace || ws || "main").toLowerCase(),
+              ]
+            );
+          } catch (logErr) {
+            console.error("tracking log insert:", logErr);
+          }
+        }
+      } catch (e) {
+        console.error("queue openCount update failed:", e);
+      }`;
+    // Replace first openCount update try-block if present
+    const coalesceAt = t.indexOf("SET open_count = coalesce");
+    const execAt = coalesceAt > 0 ? t.lastIndexOf("await db.execute(", coalesceAt) : -1;
+    const updAt = t.indexOf("openCount: (qItem.openCount");
+    let replaced = false;
+    if (execAt > 0) {
+      const tryAt = t.lastIndexOf("try {", execAt);
+      const mark = t.indexOf("queue openCount fallback failed:", execAt);
+      let end = -1;
+      if (mark > 0) {
+        let i = t.indexOf("}", mark);
+        i = t.indexOf("}", i + 1);
+        end = i + 1;
+      }
+      if (tryAt >= 0 && end > tryAt) {
+        t = t.slice(0, tryAt) + sqlBlock + t.slice(end);
+        replaced = true;
+        console.log("patch-sheet-sync: track execute block replaced");
+      }
+    }
+    if (!replaced && updAt > 0) {
+      const tryAt = t.lastIndexOf("try {", updAt);
+      const mark = t.indexOf("queue openCount update failed:", updAt);
+      const end = mark > 0 ? t.indexOf("}", mark) + 1 : -1;
+      if (tryAt >= 0 && end > tryAt) {
+        t = t.slice(0, tryAt) + sqlBlock + t.slice(end);
+        replaced = true;
+        console.log("patch-sheet-sync: track drizzle block replaced");
+      }
+    }
+    if (!replaced) console.warn("patch-sheet-sync: track open block NOT found");
+  }
+  t = t.replace(
+    /after\(async \(\) => \{\s*try \{([\s\S]*?)\}\s*catch \(err\) \{\s*console\.error\("sheet open after\(\) failed:", err\);\s*\}\s*\}\);/g,
+    "await (async () => { try {$1} catch (err) { console.error(\"sheet open failed:\", err); } })();"
+  );
+  fs.writeFileSync(trackPath, t);
+}
+
+function patchDash() {
+  if (!fs.existsSync(dashPath)) return;
+  let t = fs.readFileSync(dashPath, "utf8");
+  const oldU = `SELECT COUNT(DISTINCT coalesce(nullif(trim(email), ''), tracking_id))::int AS n
+           FROM tracking_logs WHERE workspace = $1`;
+  const neuU = `SELECT COUNT(DISTINCT coalesce(nullif(trim(email), ''), tracking_id))::int AS n
+           FROM tracking_logs
+           WHERE lower(coalesce(nullif(trim(workspace), ''), 'main')) = lower($1)`;
+  if (t.includes(oldU)) {
+    t = t.replace(oldU, neuU);
+    console.log("patch-sheet-sync: unique query case-insensitive");
+  }
+  const oldQ = `SELECT COUNT(*)::int AS n FROM queue
+           WHERE workspace = $1 AND coalesce(open_count, 0) > 0`;
+  const neuQ = `SELECT COUNT(*)::int AS n FROM queue
+           WHERE lower(coalesce(workspace, 'main')) = lower($1) AND coalesce(open_count, 0) > 0`;
+  if (t.includes(oldQ)) {
+    t = t.replace(oldQ, neuQ);
+    console.log("patch-sheet-sync: unique queue case-insensitive");
+  }
+  fs.writeFileSync(dashPath, t);
+}
+
+patchSheets();
+patchSender();
+patchTrack();
+patchDash();
+console.log("patch-sheet-sync: done");
