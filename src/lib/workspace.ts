@@ -39,6 +39,8 @@ export function workspaceSql(column: any, ws: string): SQL {
 function parseTokenWorkspace(token: string): {
   username: string;
   workspace: string;
+  userId?: number;
+  role?: string;
 } | null {
   try {
     if (!token || !token.includes(".")) return null;
@@ -49,9 +51,12 @@ function parseTokenWorkspace(token: string): {
     ).toString("utf8");
     const data = JSON.parse(json);
     if (!data || !data.username) return null;
+    const uid = Number(data.userId);
     return {
       username: String(data.username),
       workspace: resolveWorkspace(data.username, data.workspace),
+      userId: Number.isFinite(uid) && uid > 0 ? uid : undefined,
+      role: data.role ? String(data.role) : undefined,
     };
   } catch {
     return null;
@@ -86,6 +91,6 @@ export function workspaceFromRequest(req: {
 export function requireSessionWorkspace(req: {
   headers: { get: (k: string) => string | null };
   cookies?: { get: (k: string) => { value: string } | undefined };
-}): { username: string; workspace: string } | null {
+}): { username: string; workspace: string; userId?: number; role?: string } | null {
   return parseTokenWorkspace(tokenFromRequest(req));
 }
