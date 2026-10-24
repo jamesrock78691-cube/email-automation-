@@ -131,13 +131,12 @@ export async function POST(request: NextRequest) {
     const allAccounts = await db
       .select()
       .from(gmailAccounts)
-      .where(
-        and(
-          eq(gmailAccounts.status, "enabled"),
-          workspaceSql(gmailAccounts.workspace, ws)
-        )
-      )
+      .where(workspaceSql(gmailAccounts.workspace, ws))
       .orderBy(desc(gmailAccounts.priority));
+    // Prefer enabled for auto-rotate; selected id is filtered separately
+    const enabledAccounts = allAccounts.filter(
+      (a) => String(a.status || "").toLowerCase() !== "disabled"
+    );
 
     const now = new Date();
     for (const acc of allAccounts) {
@@ -151,18 +150,44 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const ordered: any[] = [];
     const preferredId = smtpAccountId ? Number(smtpAccountId) : 0;
-    if (preferredId) {
-      const pref = allAccounts.find((a) => a.id === preferredId);
-      if (pref) ordered.push(pref);
-    }
-    for (const a of allAccounts) {
-      if (!ordered.some((x) => x.id === a.id)) ordered.push(a);
-    }
+    let tryList: any[] = [];
 
-    const candidates = ordered.filter((a) => isHealthy(a, now, unlimitedManual));
-    const tryList = candidates.length ? candidates : ordered;
+    // Compose: if user selected an SMTP, ONLY use that account (no silent fallback)
+    if (preferredId && Number.isFinite(preferredId) && preferredId > 0) {
+      const pref = allAccounts.find((a) => Number(a.id) === preferredId);
+      if (!pref) {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "Selected SMTP account not found in this workspace (id=" +
+              preferredId +
+              "). Pick another account.",
+          },
+          { status: 400 }
+        );
+      }
+      if (String(pref.status || "").toLowerCase() === "disabled") {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "Selected SMTP is disabled: " +
+              (pref.email || preferredId) +
+              ". Enable it or choose another.",
+          },
+          { status: 400 }
+        );
+      }
+      tryList = [pref];
+    } else {
+      const ordered: any[] = [...enabledAccounts];
+      const candidates = ordered.filter((a) =>
+        isHealthy(a, now, unlimitedManual)
+      );
+      tryList = candidates.length ? candidates : ordered;
+    }
 
     if (!tryList.length) {
       return NextResponse.json(
@@ -188,8 +213,15 @@ export async function POST(request: NextRequest) {
       tried.push(acc.email || String(acc.id));
       try {
         const transporter = createSmtpTransport(acc);
-        const displayFrom = fromEmail || smtpFromAddress(acc);
-        const displayName = fromName || acc.senderName || acc.email;
+        // When user picked a specific SMTP, always send as that account (not a stale From field)
+        const displayFrom =
+          preferredId > 0
+            ? smtpFromAddress(acc) || acc.email
+            : fromEmail || smtpFromAddress(acc) || acc.email;
+        const displayName =
+          preferredId > 0
+            ? fromName || acc.senderName || acc.email
+            : fromName || acc.senderName || acc.email;
         await transporter.sendMail({
           from: `"${displayName}" <${displayFrom}>`,
           replyTo: replyTo || acc.replyToEmail || displayFrom,
@@ -317,6 +349,7 @@ export async function POST(request: NextRequest) {
       success: true,
       message: "Email sent successfully",
       usedAccount: account.email,
+      selectedSmtpId: preferredId || null,
       trackingId,
       workspace: ws,
       tried,
