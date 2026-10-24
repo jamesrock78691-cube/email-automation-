@@ -83,8 +83,9 @@ async function bumpAgentStats(
   }
 }
 
-function isHealthy(acc: any, now: Date) {
+function isHealthy(acc: any, now: Date, unlimited = false) {
   if (String(acc.status || "").toLowerCase() === "disabled") return false;
+  if (unlimited) return true; // admin/main: no daily, minute, or cooldown limits on manual
   if (acc.cooldownUntil && new Date(acc.cooldownUntil) > now) return false;
   if ((acc.sentToday || 0) >= (acc.dailyLimit || 500)) return false;
   if ((acc.sentThisMinute || 0) >= (acc.minuteLimit || 50)) return false;
@@ -115,6 +116,10 @@ export async function POST(request: NextRequest) {
 
     const emailHtml = toSendableEmailHtml(String(html || ""));
     const ws = workspaceFromRequest(request);
+    // Admin / main workspace: unlimited manual sending (no SMTP daily/minute/cooldown blocks)
+    const unlimitedManual =
+      String(ws || "").toLowerCase() === "main" ||
+      String(ws || "").toLowerCase() === "admin";
 
     if (!to || !subject || !html) {
       return NextResponse.json(
@@ -156,7 +161,7 @@ export async function POST(request: NextRequest) {
       if (!ordered.some((x) => x.id === a.id)) ordered.push(a);
     }
 
-    const candidates = ordered.filter((a) => isHealthy(a, now));
+    const candidates = ordered.filter((a) => isHealthy(a, now, unlimitedManual));
     const tryList = candidates.length ? candidates : ordered;
 
     if (!tryList.length) {
@@ -232,7 +237,10 @@ export async function POST(request: NextRequest) {
     }
 
     const cooldownUntil = new Date();
-    cooldownUntil.setSeconds(cooldownUntil.getSeconds() + 15);
+    // main/admin: no cooldown after manual send
+    if (!unlimitedManual) {
+      cooldownUntil.setSeconds(cooldownUntil.getSeconds() + 15);
+    }
 
     await db
       .update(gmailAccounts)
@@ -240,7 +248,7 @@ export async function POST(request: NextRequest) {
         sentToday: (account.sentToday || 0) + 1,
         sentThisMinute: (account.sentThisMinute || 0) + 1,
         lastUsedAt: new Date(),
-        cooldownUntil,
+        cooldownUntil: unlimitedManual ? null : cooldownUntil,
         errorCount: 0,
       })
       .where(eq(gmailAccounts.id, account.id));
@@ -313,6 +321,7 @@ export async function POST(request: NextRequest) {
       workspace: ws,
       tried,
       htmlLength: htmlWithPixel.length,
+      unlimitedManual,
     });
   } catch (error: any) {
     console.error("Manual send error:", error);
