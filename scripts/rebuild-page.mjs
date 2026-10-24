@@ -7,6 +7,7 @@
  * - Live Tracking Pixel Opens: full date + time
  * - Live sheet import: one-click loop until ALL rows imported
  * - OPENS column openCount / open_count fallback
+ * - Compose: admin/super_admin unlimited (no client daily limit block)
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -183,6 +184,61 @@ text = patch(text, "new Date(item.lastOpenedAt)", "new Date(item.lastOpenedAt ||
 
 text = text.split("Live Google Sheet failed. Check .env").join("Live Google Sheet failed");
 text = text.split("Check .env").join("see error details");
+
+// ---- COMPOSE_ADMIN_UNLIMITED : admin/super_admin skip client daily limit on Compose ----
+const OLD_LIMIT_CHECK = `  // Operator daily limit check (client-side hint)
+  const st = authUser?.stats;
+  if (st && st.sentToday >= st.dailyLimit) {
+    showError(\`Daily limit reached (\${st.sentToday}/\${st.dailyLimit}). Contact admin.\`);
+    return;
+  }`;
+
+const NEW_LIMIT_CHECK = `  // Operator daily limit check (skip for admin / super_admin — unlimited compose)
+  const st = authUser?.stats;
+  const adminUnlimited =
+    !!authUser &&
+    (authUser.role === "super_admin" ||
+      authUser.role === "admin" ||
+      authUser.username === "admin" ||
+      authUser.username === "superadmin" ||
+      (typeof isSuperAdmin === "function" && isSuperAdmin()));
+  if (
+    !adminUnlimited &&
+    st &&
+    Number(st.dailyLimit || 0) > 0 &&
+    Number(st.sentToday || 0) >= Number(st.dailyLimit || 0)
+  ) {
+    showError(\`Daily limit reached (\${st.sentToday}/\${st.dailyLimit}). Contact admin.\`);
+    return;
+  }`;
+
+if (text.includes(OLD_LIMIT_CHECK)) {
+  text = text.replace(OLD_LIMIT_CHECK, NEW_LIMIT_CHECK);
+  console.log("Patched: compose admin unlimited limit check");
+} else if (text.includes("Operator daily limit check")) {
+  text = text.replace(
+    /\/\/ Operator daily limit check[\s\S]*?return;\s*\}/,
+    NEW_LIMIT_CHECK.trim()
+  );
+  console.log("Patched: compose limit check (loose)");
+} else {
+  console.log("Skip: compose limit check not found");
+}
+
+text = patch(
+  text,
+  `        } else if (rec.status === 429) {
+          showError(recData.error || "Daily limit reached");
+        }`,
+  `        } else if (rec.status === 429) {
+          const adminSkip =
+            authUser?.role === "super_admin" ||
+            authUser?.role === "admin" ||
+            authUser?.username === "admin";
+          if (!adminSkip) showError(recData.error || "Daily limit reached");
+        }`,
+  "compose record_send 429 admin skip"
+);
 
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
 fs.writeFileSync(OUT, text);
