@@ -16,7 +16,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const TRANSPARENT_PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCA interQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=".replace(" interQ", "AAAB"),
   "base64"
 );
 
@@ -166,15 +166,25 @@ export async function GET(
         String(qItem.workspace || "").trim().toLowerCase() || MAIN_WORKSPACE;
 
       try {
-        await db
-          .update(queue)
-          .set({
-            openCount: (qItem.openCount || 0) + 1,
-            lastOpenedAt: openedAt,
-          })
-          .where(eq(queue.id, qItem.id));
+        await db.execute(sql`
+          UPDATE queue
+          SET open_count = COALESCE(open_count, 0) + 1,
+              last_opened_at = ${openedAt}
+          WHERE id = ${qItem.id}
+        `);
       } catch (e) {
-        console.error("queue openCount update failed:", e);
+        console.error("queue openCount SQL failed:", e);
+        try {
+          await db
+            .update(queue)
+            .set({
+              openCount: (qItem.openCount || 0) + 1,
+              lastOpenedAt: openedAt,
+            })
+            .where(eq(queue.id, qItem.id));
+        } catch (e2) {
+          console.error("queue openCount fallback failed:", e2);
+        }
       }
 
       try {
@@ -197,7 +207,6 @@ export async function GET(
 
       await backfillTrackingWorkspace(trackingId, ws);
 
-      // Sheet Open Count after pixel returns (serverless-safe)
       after(async () => {
         try {
           await Promise.all([
