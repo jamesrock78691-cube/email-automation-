@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { db } from "@/db";
 import { queue, trackingLogs, settings } from "@/db/schema";
 import { eq, sql } from "drizzle-orm";
@@ -197,15 +197,25 @@ export async function GET(
 
       await backfillTrackingWorkspace(trackingId, ws);
 
-      // Update BOTH auto sheet and manual log sheet
-      await Promise.all([
-        recordOpenOnAutoSheet(trackingId, openedAtIso, ws).catch((err) =>
-          console.error("auto sheet open update failed:", err)
-        ),
-        recordOpenOnManualSheet(trackingId, openedAtIso).catch((err) =>
-          console.error("manual sheet open update failed:", err)
-        ),
-      ]);
+      // Sheet Open Count after pixel returns (serverless-safe)
+      after(async () => {
+        try {
+          await Promise.all([
+            recordOpenOnAutoSheet(trackingId, openedAtIso, ws, {
+              email: qItem.email || emailFromQuery || undefined,
+              serialNo: qItem.serialNo || undefined,
+              referenceNo: qItem.referenceNo || undefined,
+            }).catch((err) =>
+              console.error("auto sheet open update failed:", err)
+            ),
+            recordOpenOnManualSheet(trackingId, openedAtIso).catch((err) =>
+              console.error("manual sheet open update failed:", err)
+            ),
+          ]);
+        } catch (err) {
+          console.error("sheet open after() failed:", err);
+        }
+      });
 
       console.log(
         `[TRACKING PIXEL] ws=${ws} trackId=${trackingId} email=${qItem.email || emailFromQuery || "-"} ip=${ipAddress}`
@@ -229,7 +239,9 @@ export async function GET(
       try {
         const [manualRes, autoRes] = await Promise.all([
           recordOpenOnManualSheet(trackingId, openedAtIso),
-          recordOpenOnAutoSheet(trackingId, openedAtIso, ws),
+          recordOpenOnAutoSheet(trackingId, openedAtIso, ws, {
+            email: manualEmail || undefined,
+          }),
         ]);
         const sheetRes = manualRes?.success ? manualRes : autoRes;
         if (sheetRes?.success) {
