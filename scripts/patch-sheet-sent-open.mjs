@@ -290,27 +290,59 @@ function patchTrack() {
   }
   let t = fs.readFileSync(trackPath, "utf8");
 
+  // Ensure after() is imported
   if (!t.includes("after")) {
     t = t.replace(
-      /import\s*\{([^}]+)\}\s*from\s*"next\/server"\s*;/,
-      (full, inner) => {
-        if (String(inner).includes("after")) return full;
-        return `import { ${String(inner).trim()}, after } from "next/server";`;
-      }
+      'import { NextRequest, NextResponse } from "next/server";',
+      'import { NextRequest, NextResponse, after } from "next/server";'
     );
   }
 
-  t = t.replace(
-    /recordOpenOnAutoSheet\(\s*trackingId\s*,\s*openedAtIso\s*,\s*ws\s*\)/g,
+  // Queue branch only: inject hints with qItem (must not touch manual branch)
+  const queueCall =
+    "recordOpenOnAutoSheet(trackingId, openedAtIso, ws).catch((err) =>";
+  const queueCallFixed =
     `recordOpenOnAutoSheet(trackingId, openedAtIso, ws, {
-              email: qItem?.email || emailFromQuery || undefined,
-              serialNo: qItem?.serialNo || undefined,
-              referenceNo: qItem?.referenceNo || undefined,
-            })`
-  );
+              email: qItem.email || emailFromQuery || undefined,
+              serialNo: qItem.serialNo || undefined,
+              referenceNo: qItem.referenceNo || undefined,
+            }).catch((err) =>`;
+  if (t.includes(queueCall)) {
+    t = t.replace(queueCall, queueCallFixed);
+    console.log("patch-sheet-sync: queue branch hints ok");
+  }
+
+  // Manual branch: hints with manualEmail only (never qItem)
+  const manualCall =
+    "recordOpenOnAutoSheet(trackingId, openedAtIso, ws),";
+  const manualCallFixed =
+    `recordOpenOnAutoSheet(trackingId, openedAtIso, ws, {
+            email: manualEmail || undefined,
+          }),`;
+  if (t.includes(manualCall)) {
+    t = t.replace(manualCall, manualCallFixed);
+    console.log("patch-sheet-sync: manual branch hints ok");
+  }
+
+  // Strip any bad qItem refs inside manual block (safety)
+  const mStart = t.indexOf("let manualEmail");
+  const mEnd = t.indexOf("trackingLogs insert (manual)");
+  if (mStart >= 0 && mEnd > mStart) {
+    const before = t.slice(0, mStart);
+    let mid = t.slice(mStart, mEnd);
+    const afterPart = t.slice(mEnd);
+    mid = mid.replace(/qItem\?\.email\s*\|\|\s*emailFromQuery\s*\|\|\s*undefined/g, "manualEmail || undefined");
+    mid = mid.replace(/qItem\?\.serialNo\s*\|\|\s*undefined/g, "undefined");
+    mid = mid.replace(/qItem\?\.referenceNo\s*\|\|\s*undefined/g, "undefined");
+    mid = mid.replace(/qItem\.email/g, "manualEmail");
+    mid = mid.replace(/qItem\.serialNo/g, "undefined");
+    mid = mid.replace(/qItem\.referenceNo/g, "undefined");
+    t = before + mid + afterPart;
+    console.log("patch-sheet-sync: scrubbed qItem from manual block");
+  }
 
   fs.writeFileSync(trackPath, t);
-  console.log("patch-sheet-sync: track hints patched");
+  console.log("patch-sheet-sync: track patched safely");
 }
 
 patchSheets();
