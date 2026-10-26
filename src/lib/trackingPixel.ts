@@ -37,8 +37,7 @@ function resolvePixelOrigin(baseUrl?: string): string {
 
 /**
  * Build a tracking pixel Gmail actually loads.
- * Uses /p/{id}.png (looks like a normal image, not /api/track).
- * Injected at TOP of <body> so Gmail "clipped message" still fires the open.
+ * Uses /p/{id}.png (rewrite → /api/track).
  */
 export function buildTrackingPixelHtml(
   baseUrl: string,
@@ -55,19 +54,19 @@ export function buildTrackingPixelHtml(
     src += `&e=${encodeURIComponent(email)}`;
   }
 
-  // 3x3, table-wrapped, never display:none — Gmail skips hidden 1x1 trackers
+  // 5x5, table-wrapped, never display:none — Gmail skips hidden 1x1 trackers
   return (
     `<table role="presentation" border="0" cellpadding="0" cellspacing="0" ` +
-    `style="border-collapse:collapse;"><tr><td style="font-size:0;line-height:0;">` +
-    `<img src="${src}" width="3" height="3" alt="" border="0" ` +
-    `style="width:3px;height:3px;border:0;display:block;" />` +
+    `style="border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;">` +
+    `<tr><td style="font-size:0;line-height:0;width:5px;height:5px;">` +
+    `<img src="${src}" width="5" height="5" alt="" border="0" ` +
+    `style="width:5px;height:5px;border:0;display:block;opacity:0.01;" />` +
     `</td></tr></table>`
   );
 }
 
 /**
- * Inject at the START of <body> (Gmail clips the bottom of long trademark emails)
- * and also before </body> as fallback.
+ * Inject at START of <body> (Gmail clips bottom) AND before </body> as fallback.
  */
 export function injectTrackingPixel(html: string, pixel: string): string {
   const source = String(html || "");
@@ -84,6 +83,9 @@ export function injectTrackingPixel(html: string, pixel: string): string {
 
   if (/<body[^>]*>/i.test(cleaned)) {
     cleaned = cleaned.replace(/<body([^>]*)>/i, `<body$1>${pixel}`);
+    if (/<\/body\s*>/i.test(cleaned)) {
+      cleaned = cleaned.replace(/<\/body\s*>/i, `${pixel}</body>`);
+    }
     return cleaned;
   }
   if (/<\/body\s*>/i.test(cleaned)) {
@@ -92,5 +94,5 @@ export function injectTrackingPixel(html: string, pixel: string): string {
   if (/<\/html\s*>/i.test(cleaned)) {
     return cleaned.replace(/<\/html\s*>/i, `${pixel}</html>`);
   }
-  return pixel + cleaned;
+  return pixel + cleaned + pixel;
 }
