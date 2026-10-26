@@ -47,9 +47,13 @@ async function main() {
     );
   }
 
-  // Sheet updates
+  // Sheet updates — syncQueueSendToSheet (email + serial + trackingId, workspace-aware)
   text = text.replace(
-    `    try {
+    /import\s*\{\s*readRows\s*,\s*updateRow\s*\}\s*from\s*"@\/app\/services\/googleSheets"\s*;/,
+    'import { readRows, updateRow, syncQueueSendToSheet } from "@/app/services/googleSheets";'
+  );
+
+  const oldSheet = `    try {
       const rows = await readRows();
       const sheetRow = rows.find(
         (r) =>
@@ -66,32 +70,32 @@ async function main() {
       }
     } catch (err) {
       console.error("Google Sheet update failed", err);
-    }`,
-    `    try {
-      const rows = await readRows(ws);
-      const sheetRow = rows.find(
-        (r) =>
-          (item.email &&
-            r.email?.trim().toLowerCase() === item.email.trim().toLowerCase()) ||
-          r.serialNo?.trim() === item.serialNo?.trim() ||
-          r.referenceNo?.trim() === item.referenceNo?.trim()
+    }`;
+
+  const newSheet = `    try {
+      await syncQueueSendToSheet(
+        {
+          trackingId,
+          email: item.email,
+          serialNo: item.serialNo,
+          referenceNo: item.referenceNo,
+          sheetRow: (item as any).sheetRow || (item as any).sheet_row || null,
+        },
+        finalUsedAccount.email,
+        ws
       );
-      if (sheetRow) {
-        await updateRow(
-          sheetRow.rowNumber,
-          {
-            status: "Sent",
-            sentAt: new Date().toISOString(),
-            gmailUsed: finalUsedAccount.email,
-            trackingId: trackingId,
-          },
-          ws
-        );
-      }
     } catch (err) {
       console.error("Google Sheet update failed", err);
-    }`
-  );
+    }`;
+
+  if (text.includes(oldSheet)) {
+    text = text.replace(oldSheet, newSheet);
+  } else {
+    text = text.replace(
+      /try \{\s*const rows = await readRows\([\s\S]*?console\.error\("Google Sheet update failed", err\);\s*\}/,
+      newSheet.trim()
+    );
+  }
 
   // Variables — always replace original block
   const re =
