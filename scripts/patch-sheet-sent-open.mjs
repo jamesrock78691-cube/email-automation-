@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Reliable sheet Sent + Open Count (admin/sandeer/amazon)
- * Uses readRows+updateRow (proven path) with Imported-first matching.
+ * Reliable sheet Sent + Open Count for main / sandeer / amazon.
+ * Runs after restore-googleSheets + restore-emailSender in prebuild.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -27,7 +27,8 @@ async function findAutoSheetDataRow(
     serialNo?: string;
     referenceNo?: string;
     sheetRow?: number | null;
-  }
+  },
+  opts?: { preferImported?: boolean }
 ): Promise<{ rowNumber: number; openCount: number } | null> {
   const directRow = Number(match.sheetRow || 0);
   if (directRow > 1) {
@@ -39,21 +40,22 @@ async function findAutoSheetDataRow(
   const wantEmail = normSheet(match.email);
   const wantSerial = normSheet(match.serialNo);
   const wantRef = normSheet(match.referenceNo);
+  const preferImported = opts?.preferImported !== false;
 
-  const score = (r: GoogleSheetRow) => {
+  const score = (r: any) => {
     const st = normSheet(r.status);
-    const alreadySent = st === "sent" || st === "done" || st === "success";
+    const tidMatch = !!(wantTid && normSheet(r.trackingId) === wantTid);
     let s = 0;
-    if (wantTid && normSheet(r.trackingId) === wantTid) s += 100;
+    if (tidMatch) s += 100;
     if (wantSerial && wantSerial !== "n/a" && normSheet(r.serialNo) === wantSerial) s += 50;
     if (wantEmail && normSheet(r.email) === wantEmail) s += 30;
     if (wantRef && wantRef !== "n/a" && normSheet(r.referenceNo) === wantRef) s += 20;
-    if (st === "imported" || st === "pending" || st === "") s += 10;
-    if (alreadySent) s -= 40;
+    if (preferImported && (st === "imported" || st === "pending" || st === "")) s += 15;
+    if ((st === "sent" || st === "done" || st === "success") && !tidMatch) s -= 40;
     return s;
   };
 
-  let best: GoogleSheetRow | null = null;
+  let best: any = null;
   let bestScore = 0;
   for (const r of rows) {
     const s = score(r);
@@ -62,7 +64,7 @@ async function findAutoSheetDataRow(
       best = r;
     }
   }
-  if (!best || bestScore < 20) return null;
+  if (!best || bestScore < 15) return null;
   const ocRaw = parseInt(String(best.openCount || "0"), 10);
   return {
     rowNumber: best.rowNumber,
@@ -87,7 +89,7 @@ export async function syncQueueSendToSheet(
     if (!w || seen.has(w)) continue;
     seen.add(w);
     try {
-      const found = await findAutoSheetDataRow(w, item);
+      const found = await findAutoSheetDataRow(w, item, { preferImported: true });
       if (!found) {
         console.warn("[SHEET SENT] no row ws=" + w + " email=" + (item.email || "") + " serial=" + (item.serialNo || ""));
         continue;
@@ -102,28 +104,13 @@ export async function syncQueueSendToSheet(
         },
         w
       );
-      console.log(
-        "[SHEET SENT] ok ws=" +
-          w +
-          " row=" +
-          found.rowNumber +
-          " tid=" +
-          (item.trackingId || "") +
-          " email=" +
-          (item.email || "")
-      );
+      console.log("[SHEET SENT] ok ws=" + w + " row=" + found.rowNumber + " tid=" + (item.trackingId || "") + " email=" + (item.email || ""));
       return { success: true, rowNumber: found.rowNumber, workspace: w };
     } catch (err) {
       console.error("[SHEET SENT] fail", w, err);
     }
   }
-  console.error(
-    "[SHEET SENT] row not found",
-    item?.email,
-    item?.serialNo,
-    item?.trackingId,
-    "ws=" + ws
-  );
+  console.error("[SHEET SENT] row not found", item?.email, item?.serialNo, item?.trackingId, "ws=" + ws);
   return { success: false };
 }
 
@@ -135,6 +122,23 @@ export async function bumpOpenOnAutoSheet(
 ) {
   const id = String(trackingId || "").trim();
   if (!id) return { success: false, error: "no tracking id" };
+
+  let h = { ...(hints || {}) };
+  if (!h.email && !h.serialNo) {
+    try {
+      const q = await db.select().from(queue).where(eq(queue.trackingId, id)).limit(1);
+      if (q[0]) {
+        h = {
+          email: q[0].email || h.email,
+          serialNo: q[0].serialNo || h.serialNo,
+          referenceNo: q[0].referenceNo || h.referenceNo,
+        };
+      }
+    } catch (e) {
+      console.warn("[OPEN SHEET] queue hint lookup failed", e);
+    }
+  }
+
   const order = preferredWs
     ? [String(preferredWs).toLowerCase(), ...SHEET_WORKSPACES]
     : [...SHEET_WORKSPACES];
@@ -143,12 +147,16 @@ export async function bumpOpenOnAutoSheet(
     if (!w || seen.has(w)) continue;
     seen.add(w);
     try {
-      const found = await findAutoSheetDataRow(w, {
-        trackingId: id,
-        email: hints?.email,
-        serialNo: hints?.serialNo,
-        referenceNo: hints?.referenceNo,
-      });
+      const found = await findAutoSheetDataRow(
+        w,
+        {
+          trackingId: id,
+          email: h.email,
+          serialNo: h.serialNo,
+          referenceNo: h.referenceNo,
+        },
+        { preferImported: false }
+      );
       if (!found) continue;
       const next = (found.openCount || 0) + 1;
       const openedAt = openedAtIso || new Date().toISOString();
@@ -178,42 +186,33 @@ function patchSheets() {
   }
   let t = fs.readFileSync(sheetsPath, "utf8");
 
-  // Load more rows so Sent update finds rows beyond first page
   if (!t.includes("getRows({ limit:")) {
     t = t.replace(
-      "const rows = await sheet.getRows();",
+      /const rows = await sheet\.getRows\(\);/g,
       "const rows = await sheet.getRows({ limit: 10000 });"
     );
     console.log("patch-sheet-sync: getRows limit 10000");
   }
 
-  // Insert helpers before first export async function if not present
-  if (!t.includes("export async function syncQueueSendToSheet")) {
-    const anchor = "export async function recordOpenOnAutoSheet";
-    if (t.includes(anchor)) {
-      t = t.replace(anchor, HELPERS + "\n" + anchor);
-      console.log("patch-sheet-sync: helpers inserted before recordOpen");
-    } else {
-      const a2 = "export async function readRows";
-      if (t.includes(a2)) {
-        t = t.replace(a2, HELPERS + "\n" + a2);
-        console.log("patch-sheet-sync: helpers inserted before readRows");
-      } else {
-        t = t + "\n" + HELPERS;
-        console.log("patch-sheet-sync: helpers appended");
-      }
-    }
-  } else {
+  if (t.includes("export async function syncQueueSendToSheet")) {
     const start = t.indexOf("function normSheet");
-    const altStart = t.indexOf("export async function syncQueueSendToSheet");
-    const insertAt = start >= 0 ? start : altStart;
-    if (insertAt >= 0) {
-      let end = t.indexOf("export async function recordOpenOnAutoSheet", insertAt + 10);
-      if (end < 0) end = t.indexOf("export async function recordOpenOnManualSheet", insertAt + 10);
-      if (end < 0) end = t.length;
-      t = t.slice(0, insertAt) + HELPERS + "\n" + t.slice(end);
-      console.log("patch-sheet-sync: helpers replaced");
+    const alt = t.indexOf("export async function syncQueueSendToSheet");
+    const insertAt = start >= 0 ? start : alt;
+    let end = t.indexOf("export async function recordOpenOnAutoSheet", insertAt + 5);
+    if (end < 0) end = t.indexOf("export async function recordOpenOnManualSheet", insertAt + 5);
+    if (insertAt >= 0 && end > insertAt) {
+      t = t.slice(0, insertAt) + t.slice(end);
+      console.log("patch-sheet-sync: removed old helpers");
     }
+  }
+
+  const anchor = "export async function recordOpenOnAutoSheet";
+  if (t.includes(anchor)) {
+    t = t.replace(anchor, HELPERS + "\n" + anchor);
+    console.log("patch-sheet-sync: helpers inserted");
+  } else {
+    t = t + "\n" + HELPERS;
+    console.log("patch-sheet-sync: helpers appended");
   }
 
   const start = t.indexOf("export async function recordOpenOnAutoSheet");
@@ -222,15 +221,17 @@ function patchSheets() {
     const neu = `export async function recordOpenOnAutoSheet(
   trackingId: string,
   openedAtIso?: string,
-  preferredWs?: string | null
+  preferredWs?: string | null,
+  hints?: { email?: string; serialNo?: string; referenceNo?: string }
 ) {
-  return bumpOpenOnAutoSheet(trackingId, openedAtIso, preferredWs);
+  return bumpOpenOnAutoSheet(trackingId, openedAtIso, preferredWs, hints);
 }
 
 `;
     t = t.slice(0, start) + neu + t.slice(end);
-    console.log("patch-sheet-sync: recordOpenOnAutoSheet replaced");
+    console.log("patch-sheet-sync: recordOpenOnAutoSheet -> bumpOpenOnAutoSheet");
   }
+
   fs.writeFileSync(sheetsPath, t);
 }
 
@@ -240,19 +241,18 @@ function patchSender() {
     return;
   }
   let t = fs.readFileSync(senderPath, "utf8");
+
   if (!t.includes("syncQueueSendToSheet")) {
     t = t.replace(
-      'import { readRows, updateRow } from "@/app/services/googleSheets";',
+      /import\s*\{\s*readRows\s*,\s*updateRow\s*\}\s*from\s*"@\/app\/services\/googleSheets"\s*;/,
       'import { readRows, updateRow, syncQueueSendToSheet } from "@/app/services/googleSheets";'
     );
   }
 
-  const re =
-    /try \{\s*(?:const rows = await readRows\([\s\S]*?|await syncQueueSendToSheet\([\s\S]*?)console\.error\("Google Sheet update failed", err\);\s*\}/;
-  if (re.test(t)) {
-    t = t.replace(
-      re,
-      `try {
+  const sheetBlockRe =
+    /try \{\s*const rows = await readRows\([\s\S]*?console\.error\("Google Sheet update failed", err\);\s*\}/;
+
+  const replacement = `try {
       const sheetResult = await syncQueueSendToSheet(
         {
           trackingId,
@@ -269,42 +269,17 @@ function patchSender() {
       }
     } catch (err) {
       console.error("Google Sheet update failed", err);
-    }`
-    );
-    console.log("patch-sheet-sync: sender sheet block replaced");
+    }`;
+
+  if (sheetBlockRe.test(t)) {
+    t = t.replace(sheetBlockRe, replacement);
+    console.log("patch-sheet-sync: sender uses syncQueueSendToSheet");
   } else if (t.includes("syncQueueSendToSheet(")) {
     console.log("patch-sheet-sync: sender already calls sync");
   } else {
-    const marker =
-      'status: "sent",\n        gmailUsedId: finalUsedAccount.id,';
-    if (t.includes(marker) && !t.includes("syncQueueSendToSheet(")) {
-      t = t.replace(
-        /where\(eq\(queue\.id, item\.id\)\);\s*\n\s*return \{/,
-        `where(eq(queue.id, item.id));
-
-    try {
-      await syncQueueSendToSheet(
-        {
-          trackingId,
-          email: item.email,
-          serialNo: item.serialNo,
-          referenceNo: item.referenceNo,
-          sheetRow: (item as any).sheetRow || (item as any).sheet_row || null,
-        },
-        finalUsedAccount.email,
-        ws
-      );
-    } catch (err) {
-      console.error("Google Sheet update failed", err);
-    }
-
-    return {`
-      );
-      console.log("patch-sheet-sync: sender sheet block inserted");
-    } else {
-      console.warn("patch-sheet-sync: sender sheet block NOT found");
-    }
+    console.warn("patch-sheet-sync: sender sheet block NOT found");
   }
+
   fs.writeFileSync(senderPath, t);
 }
 
@@ -314,10 +289,28 @@ function patchTrack() {
     return;
   }
   let t = fs.readFileSync(trackPath, "utf8");
-  if (t.includes('import { db } from "@/db";') && !t.includes("import { pool }")) {
-    t = t.replace('import { db } from "@/db";', 'import { db, pool } from "@/db";');
+
+  if (!t.includes("after")) {
+    t = t.replace(
+      /import\s*\{([^}]+)\}\s*from\s*"next\/server"\s*;/,
+      (full, inner) => {
+        if (String(inner).includes("after")) return full;
+        return `import { ${String(inner).trim()}, after } from "next/server";`;
+      }
+    );
   }
+
+  t = t.replace(
+    /recordOpenOnAutoSheet\(\s*trackingId\s*,\s*openedAtIso\s*,\s*ws\s*\)/g,
+    `recordOpenOnAutoSheet(trackingId, openedAtIso, ws, {
+              email: qItem?.email || emailFromQuery || undefined,
+              serialNo: qItem?.serialNo || undefined,
+              referenceNo: qItem?.referenceNo || undefined,
+            })`
+  );
+
   fs.writeFileSync(trackPath, t);
+  console.log("patch-sheet-sync: track hints patched");
 }
 
 patchSheets();
