@@ -2,6 +2,7 @@
 /**
  * After restore-auth: PST day/month stats, manager role, seed manager user.
  * Safe normalizeRole replace (must not break const r declaration).
+ * Also injects get_smtp_assignments action.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -33,7 +34,6 @@ const GOOD_NORM = `function normalizeRole(role: string | null | undefined): stri
   return "operator";
 }`;
 
-// Match full function including ": string {" return type
 const NORM_RE = /function normalizeRole\([^)]*\)[^{]*\{[\s\S]*?\n\}/;
 
 if (NORM_RE.test(t)) {
@@ -56,7 +56,7 @@ function pstKeys(d: Date = new Date()) {
   const y = get("year");
   const m = get("month");
   const day = get("day");
-  return { dayKey: \`\${y}-\${m}-\${day}\`, monthKey: \`\${y}-\${m}\` };
+  return { dayKey: \`${y}-${m}-${day}\`, monthKey: \`${y}-${m}\` };
 }
 
 `;
@@ -195,7 +195,6 @@ async function ensureManagerUser() {
   console.log("patch-auth-manager: ensureManagerUser injected");
 }
 
-// Hard fail if still broken
 if (t.includes('if (!role) if (r === "manager")') || /const r = String\(role\)[\s\S]*if \(!role\) if \(r/.test(t)) {
   t = t.replace(NORM_RE, GOOD_NORM);
   console.log("patch-auth-manager: forced normalizeRole repair");
@@ -204,6 +203,39 @@ if (t.includes('if (!role) if (r === "manager")') || /const r = String\(role\)[\
 if (!t.includes('if (r === "manager") return "manager"')) {
   console.error("patch-auth-manager: FATAL normalizeRole missing manager");
   process.exit(1);
+}
+
+// ---- get_smtp_assignments (accountId→userIds map, same as UI) ----
+if (!t.includes('action === "get_smtp_assignments"')) {
+  const getBlock = `
+    if (action === "get_smtp_assignments") {
+      const session = getSession(req);
+      if (!session) {
+        return NextResponse.json(
+          { success: false, error: "Not authenticated" },
+          { status: 401 }
+        );
+      }
+      const wsSmtp = resolveWorkspace(session.username, (session as any).workspace);
+      const map = await getJsonSetting(settingKey("smtp_assignments", wsSmtp), {});
+      return NextResponse.json({ success: true, map: map || {} });
+    }
+
+`;
+  const anchor = 'if (action === "set_smtp_assignments")';
+  if (t.includes(anchor)) {
+    t = t.replace(anchor, getBlock + anchor);
+    console.log("patch-auth-manager: get_smtp_assignments added");
+  } else {
+    const unk =
+      'return NextResponse.json(\n      { success: false, error: "Unknown action" }';
+    if (t.includes(unk)) {
+      t = t.replace(unk, getBlock + unk);
+      console.log("patch-auth-manager: get_smtp_assignments before unknown");
+    } else {
+      console.warn("patch-auth-manager: could not insert get_smtp_assignments");
+    }
+  }
 }
 
 fs.writeFileSync(FILE, t);
