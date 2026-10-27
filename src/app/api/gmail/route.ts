@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, pool } from "@/db";
-import { gmailAccounts, settings } from "@/db/schema";
+import { gmailAccounts } from "@/db/schema";
 import { eq, inArray, and } from "drizzle-orm";
 import { shouldResetDailyQuota } from "@/lib/dailyQuota";
 import { workspaceSql } from "@/lib/workspace";
@@ -8,23 +8,10 @@ import {
   getSessionFromRequest,
   normalizeRole,
 } from "@/lib/authSession";
-
-async function getSmtpAssignments(ws: string): Promise<Record<string, number[]>> {
-  try {
-    const key =
-      !ws || ws === "main" ? "smtp_assignments" : `smtp_assignments__${ws}`;
-    const rows = await db
-      .select()
-      .from(settings)
-      .where(eq(settings.key, key))
-      .limit(1);
-    if (!rows.length) return {};
-    const map = JSON.parse(rows[0].value || "{}");
-    return map && typeof map === "object" ? map : {};
-  } catch {
-    return {};
-  }
-}
+import {
+  loadSmtpAssignmentMap,
+  allowedSmtpIdsForUser,
+} from "@/lib/smtpAssignments";
 
 export async function GET(request: NextRequest) {
   try {
@@ -41,14 +28,12 @@ export async function GET(request: NextRequest) {
     let list: any[] = [];
 
     if (role === "operator") {
-      const assignments = await getSmtpAssignments(ws);
-      const allowedIds: number[] = (
-        assignments[String(session.userId)] ||
-        assignments[session.username] ||
-        []
-      )
-        .map((id: any) => Number(id))
-        .filter((id: number) => !isNaN(id) && id > 0);
+      const assignments = await loadSmtpAssignmentMap(ws);
+      const allowedIds = allowedSmtpIdsForUser(
+        assignments,
+        session.userId,
+        session.username
+      );
 
       if (allowedIds.length > 0) {
         list = await db
@@ -61,6 +46,8 @@ export async function GET(request: NextRequest) {
             )
           )
           .orderBy(gmailAccounts.id);
+      } else {
+        list = [];
       }
       list = list.map(({ appPassword, ...rest }) => rest);
     } else {
@@ -102,7 +89,9 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    console.log(`[GMAIL GET] user=${session.username} ws=${ws} count=${list.length}`);
+    console.log(
+      `[GMAIL GET] user=${session.username} role=${role} ws=${ws} count=${list.length}`
+    );
     return NextResponse.json({ success: true, list, workspace: ws });
   } catch (error: any) {
     return NextResponse.json(
@@ -157,7 +146,6 @@ export async function POST(request: NextRequest) {
     const ws = session.workspace;
     const emailNorm = String(email).trim().toLowerCase();
 
-    // Force workspace via raw SQL so it can never default to main
     const port = smtpPort ? Number(smtpPort) : 465;
     const isSecure =
       secure !== undefined ? Boolean(secure) : port === 465;
@@ -267,7 +255,6 @@ export async function PUT(request: NextRequest) {
 
     const ws = session.workspace;
 
-    // Only touch accounts in THIS workspace
     const existing = await db
       .select()
       .from(gmailAccounts)
@@ -315,7 +302,6 @@ export async function PUT(request: NextRequest) {
       updates.errorCount = 0;
       updates.cooldownUntil = null;
     }
-    // Never allow client to change workspace
     updates.workspace = ws;
 
     const updated = await db
