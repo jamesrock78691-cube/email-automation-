@@ -13,6 +13,11 @@ import {
 } from "@/lib/trackingPixel";
 import { smtpFromAddress, createSmtpTransport } from "@/lib/smtpAccount";
 import {
+  loadSmtpAssignmentMap,
+  allowedSmtpIdsForUser,
+} from "@/lib/smtpAssignments";
+import { getSessionFromRequest, normalizeRole } from "@/lib/authSession";
+import {
   workspaceFromRequest,
   workspaceSql,
   settingKey,
@@ -85,7 +90,7 @@ async function bumpAgentStats(
 
 function isHealthy(acc: any, now: Date, unlimited = false) {
   if (String(acc.status || "").toLowerCase() === "disabled") return false;
-  if (unlimited) return true; // admin/main: no daily, minute, or cooldown limits on manual
+  if (unlimited) return true;
   if (acc.cooldownUntil && new Date(acc.cooldownUntil) > now) return false;
   if ((acc.sentToday || 0) >= (acc.dailyLimit || 500)) return false;
   if ((acc.sentThisMinute || 0) >= (acc.minuteLimit || 50)) return false;
@@ -116,7 +121,6 @@ export async function POST(request: NextRequest) {
 
     const emailHtml = toSendableEmailHtml(String(html || ""));
     const ws = workspaceFromRequest(request);
-    // Admin / main workspace: unlimited manual sending (no SMTP daily/minute/cooldown blocks)
     const unlimitedManual =
       String(ws || "").toLowerCase() === "main" ||
       String(ws || "").toLowerCase() === "admin";
@@ -128,12 +132,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const allAccounts = await db
+    let allAccounts = await db
       .select()
       .from(gmailAccounts)
       .where(workspaceSql(gmailAccounts.workspace, ws))
       .orderBy(desc(gmailAccounts.priority));
-    // Prefer enabled for auto-rotate; selected id is filtered separately
+
+    // Operators: only checkmark-assigned SMTPs
+    const session = getSessionFromRequest(request);
+    const role = session
+      ? normalizeRole(session.role, session.username)
+      : "";
+    if (role === "operator" && session) {
+      const map = await loadSmtpAssignmentMap(ws);
+      const allowedIds = new Set(
+        allowedSmtpIdsForUser(map, session.userId, session.username)
+      );
+      allAccounts = allAccounts.filter((a) => allowedIds.has(Number(a.id)));
+    }
+
     const enabledAccounts = allAccounts.filter(
       (a) => String(a.status || "").toLowerCase() !== "disabled"
     );
@@ -153,7 +170,6 @@ export async function POST(request: NextRequest) {
     const preferredId = smtpAccountId ? Number(smtpAccountId) : 0;
     let tryList: any[] = [];
 
-    // Compose: if user selected an SMTP, ONLY use that account (no silent fallback)
     if (preferredId && Number.isFinite(preferredId) && preferredId > 0) {
       const pref = allAccounts.find((a) => Number(a.id) === preferredId);
       if (!pref) {
@@ -161,9 +177,9 @@ export async function POST(request: NextRequest) {
           {
             success: false,
             error:
-              "Selected SMTP account not found in this workspace (id=" +
+              "Selected SMTP is not allowed for your account (id=" +
               preferredId +
-              "). Pick another account.",
+              "). Admin must checkmark this SMTP for you.",
           },
           { status: 400 }
         );
@@ -194,7 +210,9 @@ export async function POST(request: NextRequest) {
         {
           success: false,
           error:
-            "No available SMTP account in this workspace (all disabled, cooldown, or daily limit reached).",
+            role === "operator"
+              ? "No SMTP assigned to your account. Ask admin to checkmark SMTP for you."
+              : "No available SMTP account in this workspace (all disabled, cooldown, or daily limit reached).",
         },
         { status: 400 }
       );
@@ -213,7 +231,6 @@ export async function POST(request: NextRequest) {
       tried.push(acc.email || String(acc.id));
       try {
         const transporter = createSmtpTransport(acc);
-        // When user picked a specific SMTP, always send as that account (not a stale From field)
         const displayFrom =
           preferredId > 0
             ? smtpFromAddress(acc) || acc.email
@@ -269,7 +286,6 @@ export async function POST(request: NextRequest) {
     }
 
     const cooldownUntil = new Date();
-    // main/admin: no cooldown after manual send
     if (!unlimitedManual) {
       cooldownUntil.setSeconds(cooldownUntil.getSeconds() + 15);
     }
