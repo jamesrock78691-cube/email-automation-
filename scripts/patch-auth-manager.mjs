@@ -56,7 +56,7 @@ function pstKeys(d: Date = new Date()) {
   const y = get("year");
   const m = get("month");
   const day = get("day");
-  return { dayKey: \`${y}-${m}-${day}\`, monthKey: \`${y}-${m}\` };
+  return { dayKey: \`\${y}-\${m}-\${day}\`, monthKey: \`\${y}-\${m}\` };
 }
 
 `;
